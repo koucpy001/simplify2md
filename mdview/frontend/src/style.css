@@ -1,0 +1,12 @@
+/* Base reset only — all app styles live in App.vue. */
+html,
+body {
+    margin: 0;
+    background-color: #fff;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+}

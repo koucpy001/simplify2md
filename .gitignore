@@ -1,0 +1,18 @@
+# 第三方参考源码 / 便携工具（不属于本项目）
+solomd-ref/
+ferrite-portable-windows-x64/
+
+# 依赖与构建产物
+node_modules/
+mdview/frontend/dist/
+mdview/build/bin/
+
+# 本地状态与日志
+*.log
+.ferrite/
+
+# NSIS 构建时下载的临时文件
+mdview/build/windows/installer/tmp/
+
+# 本地测试样本（不入库）
+hybrid_auto/

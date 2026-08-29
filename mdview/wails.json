@@ -1,0 +1,25 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "simplify2md",
+  "outputfilename": "simplify2md",
+  "info": {
+    "fileAssociations": [
+      {
+        "ext": "md",
+        "name": "simplify2md.md",
+        "description": "Markdown 文档 (simplify2md)",
+        "iconName": "md"
+      },
+      {
+        "ext": "markdown",
+        "name": "simplify2md.markdown",
+        "description": "Markdown 文档 (simplify2md)",
+        "iconName": "md"
+      }
+    ]
+  },
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto"
+}
