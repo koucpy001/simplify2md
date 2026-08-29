@@ -96,24 +96,41 @@ function encodePNG(w, h, rgba) {
   ])
 }
 
-const [input, output, radiusArg] = process.argv.slice(2)
-if (!input || !output) throw new Error('usage: node round-alpha.mjs <in> <out> [radiusRatio]')
+const [input, output, radiusArg, bgHex] = process.argv.slice(2)
+if (!input || !output) throw new Error('usage: node round-alpha.mjs <in> <out> [radiusRatio] [bgHex]')
 const img = decodePNG(readFileSync(input))
 const radius = parseFloat(radiusArg ?? '0.205') * Math.min(img.w, img.h)
 const cx = (img.w - 1) / 2
 const cy = (img.h - 1) / 2
-const hw = img.w / 2 - 0.5 - radius
-const hh = img.h / 2 - 0.5 - radius
+// Expand the outline by half a pixel so edge pixels are fully opaque —
+// a half-transparent outermost ring reads as a faint square frame on
+// checkered/dark backgrounds and blurs the corner silhouette.
+const hw = img.w / 2 + 0.5 - radius
+const hh = img.h / 2 + 0.5 - radius
+// The capture background (page color behind the rounded rect). Edge pixels
+// stored fg blended with it, so once the geometric alpha is known the true
+// foreground is un-blended: F = (C - B*(1-a)) / a. Interior (a=1) untouched.
+let bg = null
+if (bgHex) {
+  const h = bgHex.replace('#', '')
+  bg = [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+}
 for (let y = 0; y < img.h; y++) {
   for (let x = 0; x < img.w; x++) {
+    const i = (y * img.w + x) * 4
     const px = Math.abs(x - cx) - hw
     const py = Math.abs(y - cy) - hh
     const dx = Math.max(px, 0)
     const dy = Math.max(py, 0)
     const d = Math.sqrt(dx * dx + dy * dy) + Math.min(Math.max(px, py), 0) - radius
     const a = Math.max(0, Math.min(1, 0.5 - d))
-    img.data[(y * img.w + x) * 4 + 3] = Math.round(a * 255)
+    if (bg && a > 0 && a < 1) {
+      for (let k = 0; k < 3; k++) {
+        img.data[i + k] = Math.max(0, Math.min(255, Math.round((img.data[i + k] - bg[k] * (1 - a)) / a)))
+      }
+    }
+    img.data[i + 3] = Math.round(a * 255)
   }
 }
 writeFileSync(output, encodePNG(img.w, img.h, img.data))
-console.log(`${output}: ${img.w}x${img.h}, radius ${Math.round(radius)}px`)
+console.log(`${output}: ${img.w}x${img.h}, radius ${Math.round(radius)}px${bg ? ', bg un-blend ' + bgHex : ''}`)

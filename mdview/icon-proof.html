@@ -16,6 +16,13 @@
   <div class="row"><img src="build/icon-src/icon-256.png" width="256" height="256"><span class="cap">256px</span></div>
   <div class="row"><img src="build/icon-src/icon-48.png" width="48" height="48"><img src="build/icon-src/icon-32.png" width="32" height="32"><img src="build/icon-src/icon-16.png" width="16" height="16"><span class="cap">48 / 32 / 16 px</span></div>
   <div class="row"><img src="build/appicon.png" width="200" height="200"><span class="cap">1024 主图标（缩放显示）</span></div>
+  <h2>左上角 4 倍放大（256px 图，棋盘格透明底）</h2>
+  <div class="row">
+    <div style="width:280px;height:280px;overflow:hidden;border:1px solid #555">
+      <img src="build/icon-src/icon-256.png" style="width:256px;transform:scale(4);transform-origin:0 0;image-rendering:pixelated">
+    </div>
+    <span class="cap">可清晰看到圆弧过渡，角外全透明</span>
+  </div>
 </div>
 </body>
 </html>
