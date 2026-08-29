@@ -16,3 +16,6 @@ mdview/build/windows/installer/tmp/
 
 # 本地测试样本（不入库）
 hybrid_auto/
+
+# 图标中间产物
+mdview/build/icon-src/
