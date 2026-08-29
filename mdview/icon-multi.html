@@ -17,13 +17,17 @@
       <stop offset="1" stop-color="#151b28"/>
     </linearGradient>
   </defs>
-  <rect x="0" y="0" width="1024" height="1024" rx="210" fill="url(#bg)"/>
-  <rect x="14" y="14" width="996" height="996" rx="200" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="8"/>
-  <text x="512" y="560" text-anchor="middle" dominant-baseline="central"
-        font-family="Consolas, 'Cascadia Code', monospace" font-weight="700"
-        font-size="430" letter-spacing="6">
-    <tspan fill="#ffffff">M</tspan><tspan fill="#e8a13c">&#8595;</tspan>
-  </text>
+  <!-- 92% content area with transparent margin: full-bleed rounded squares
+       read as a thin square frame at taskbar sizes. -->
+  <g transform="translate(512,512) scale(0.92) translate(-512,-512)">
+    <rect x="0" y="0" width="1024" height="1024" rx="210" fill="url(#bg)"/>
+    <rect x="14" y="14" width="996" height="996" rx="200" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="8"/>
+    <text x="512" y="560" text-anchor="middle" dominant-baseline="central"
+          font-family="Consolas, 'Cascadia Code', monospace" font-weight="700"
+          font-size="430" letter-spacing="6">
+      <tspan fill="#ffffff">M</tspan><tspan fill="#e8a13c">&#8595;</tspan>
+    </text>
+  </g>
 </svg>
 </div>
 </body>

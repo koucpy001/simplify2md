@@ -96,17 +96,19 @@ function encodePNG(w, h, rgba) {
   ])
 }
 
-const [input, output, radiusArg, bgHex] = process.argv.slice(2)
-if (!input || !output) throw new Error('usage: node round-alpha.mjs <in> <out> [radiusRatio] [bgHex]')
+const [input, output, radiusArg, bgHex, marginArg] = process.argv.slice(2)
+if (!input || !output) throw new Error('usage: node round-alpha.mjs <in> <out> [radiusRatio] [bgHex] [marginRatio]')
 const img = decodePNG(readFileSync(input))
-const radius = parseFloat(radiusArg ?? '0.205') * Math.min(img.w, img.h)
+const minSide = Math.min(img.w, img.h)
+const radius = parseFloat(radiusArg ?? '0.205') * minSide
+const margin = parseFloat(marginArg ?? '0') * minSide
 const cx = (img.w - 1) / 2
 const cy = (img.h - 1) / 2
 // Expand the outline by half a pixel so edge pixels are fully opaque —
 // a half-transparent outermost ring reads as a faint square frame on
 // checkered/dark backgrounds and blurs the corner silhouette.
-const hw = img.w / 2 + 0.5 - radius
-const hh = img.h / 2 + 0.5 - radius
+const hw = img.w / 2 - margin + 0.5 - radius
+const hh = img.h / 2 - margin + 0.5 - radius
 // The capture background (page color behind the rounded rect). Edge pixels
 // stored fg blended with it, so once the geometric alpha is known the true
 // foreground is un-blended: F = (C - B*(1-a)) / a. Interior (a=1) untouched.
