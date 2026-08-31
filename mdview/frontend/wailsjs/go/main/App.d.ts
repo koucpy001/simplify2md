@@ -6,9 +6,13 @@ export function ConfirmExit():Promise<void>;
 
 export function GetRecents():Promise<Array<string>>;
 
+export function GetStartupFile():Promise<string>;
+
 export function LoadImageForSrc(arg1:string,arg2:string,arg3:string):Promise<main.ImageData>;
 
 export function OpenFile():Promise<main.OpenResult>;
+
+export function PickSavePath(arg1:string):Promise<string>;
 
 export function ReadFileAt(arg1:string):Promise<main.OpenResult>;
 
@@ -17,5 +21,7 @@ export function RemoveRecent(arg1:string):Promise<void>;
 export function SaveFile(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function SetDirty(arg1:boolean):Promise<void>;
+
+export function SetStartupArgs(arg1:Array<string>):Promise<void>;
 
 export function SetTitle(arg1:string):Promise<void>;

@@ -10,12 +10,20 @@ export function GetRecents() {
   return window['go']['main']['App']['GetRecents']();
 }
 
+export function GetStartupFile() {
+  return window['go']['main']['App']['GetStartupFile']();
+}
+
 export function LoadImageForSrc(arg1, arg2, arg3) {
   return window['go']['main']['App']['LoadImageForSrc'](arg1, arg2, arg3);
 }
 
 export function OpenFile() {
   return window['go']['main']['App']['OpenFile']();
+}
+
+export function PickSavePath(arg1) {
+  return window['go']['main']['App']['PickSavePath'](arg1);
 }
 
 export function ReadFileAt(arg1) {
@@ -32,6 +40,10 @@ export function SaveFile(arg1, arg2, arg3, arg4) {
 
 export function SetDirty(arg1) {
   return window['go']['main']['App']['SetDirty'](arg1);
+}
+
+export function SetStartupArgs(arg1) {
+  return window['go']['main']['App']['SetStartupArgs'](arg1);
 }
 
 export function SetTitle(arg1) {

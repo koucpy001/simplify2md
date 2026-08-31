@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,5 +128,79 @@ func TestApplyNewline(t *testing.T) {
 	}
 	if got := applyNewline("a\nb\nc", "lf"); got != "a\nb\nc" {
 		t.Fatalf("lf passthrough mismatch: %q", got)
+	}
+}
+
+// An LF file with one stray CRLF keeps LF as its style (majority), instead of
+// the whole file being rewritten to CRLF on save.
+func TestDetectNewlineMixed(t *testing.T) {
+	if got := detectNewline([]byte("a\nb\nc\r\nd\n")); got != "lf" {
+		t.Fatalf("want lf for LF-dominant file, got %q", got)
+	}
+	if got := detectNewline([]byte("a\r\nb\r\nc\nd\r\n")); got != "crlf" {
+		t.Fatalf("want crlf for CRLF-dominant file, got %q", got)
+	}
+}
+
+// Binary content (NUL bytes / no CJK) must not be mis-detected as GB18030 by
+// the sanity probe — it would get re-encoded on save and corrupted.
+func TestDetectEncodingBinaryNotGB(t *testing.T) {
+	bin := append([]byte{0x89, 'P', 'N', 'G', 0x00, 0x01, 0x02, 0xFE, 0xFF}, bytes.Repeat([]byte{0xAB, 0xCD, 0x00, 0x11}, 64)...)
+	if got := detectEncoding(bin); got != "utf-8" {
+		t.Fatalf("binary mis-detected as %q, want utf-8 fallback", got)
+	}
+}
+
+// SaveFile writes atomically: content lands intact and no temp file remains.
+func TestSaveFileAtomic(t *testing.T) {
+	a := NewApp()
+	path := filepath.Join(t.TempDir(), "note.md")
+	if err := a.SaveFile(path, "# hi\n", "utf-8", "lf"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "# hi\n" {
+		t.Fatalf("content mismatch: %q err=%v", b, err)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+	// Overwrite must also work (rename replaces the existing file).
+	if err := a.SaveFile(path, "# bye\n", "utf-8", "lf"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "# bye\n" {
+		t.Fatalf("overwrite mismatch: %q", b)
+	}
+}
+
+// firstExistingFile picks the first argument naming a real file and skips
+// flags, so `simplify2md.exe C:\doc.md` opens the right document.
+func TestFirstExistingFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "x.md")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := firstExistingFile([]string{"-flag", f})
+	if !ok || got != f {
+		t.Fatalf("got %q %v, want %q", got, ok, f)
+	}
+	if _, ok := firstExistingFile([]string{"-flag", filepath.Join(t.TempDir(), "gone.md")}); ok {
+		t.Fatal("missing file must not match")
+	}
+}
+
+// Oversized images are rejected up front instead of being base64-bridged.
+func TestLoadImageTooLarge(t *testing.T) {
+	big := filepath.Join(t.TempDir(), "big.png")
+	if err := os.WriteFile(big, make([]byte, maxImageBytes+1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp()
+	if _, err := a.LoadImageForSrc(big, sampleMd, ""); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("want size-cap error, got %v", err)
 	}
 }

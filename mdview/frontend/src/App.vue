@@ -5,9 +5,11 @@ import type { OutlineItem } from './lib/markdown'
 import {
   OpenFile,
   SaveFile,
+  PickSavePath,
   LoadImageForSrc,
   ReadFileAt,
   GetRecents,
+  GetStartupFile,
   RemoveRecent,
   SetDirty,
   SetTitle,
@@ -30,6 +32,7 @@ const previewEl = ref<HTMLElement | null>(null)
 const editorHost = ref<HTMLElement | null>(null)
 let editorView: EditorView | null = null
 const imageCache = new Map<string, string>()
+const imageInFlight = new Set<string>()
 let renderTimer: ReturnType<typeof setTimeout> | null = null
 let loadingFile = false
 const exitConfirmVisible = ref(false)
@@ -270,11 +273,30 @@ async function open() {
 }
 
 async function save() {
-  if (!filePath.value) return
+  if (!filePath.value) {
+    await saveAs()
+    return
+  }
   try {
     await SaveFile(filePath.value, source.value, fileEnc.value, fileNewline.value)
     markClean()
     status.value = '已保存 ' + new Date().toLocaleTimeString()
+  } catch (e: any) {
+    status.value = String(e)
+  }
+}
+
+// 另存为：弹原生保存对话框选路径。无路径文档的首次保存也走这里——没有它，
+// "保存并退出"对无标题文档是死路（无处可写，退出弹窗关不掉）。
+async function saveAs() {
+  try {
+    const p = await PickSavePath(filePath.value ? baseName(filePath.value) : '未标题.md')
+    if (!p) return
+    await SaveFile(p, source.value, fileEnc.value, fileNewline.value)
+    filePath.value = p
+    markClean()
+    status.value = '已保存 ' + new Date().toLocaleTimeString()
+    await refreshRecents()
   } catch (e: any) {
     status.value = String(e)
   }
@@ -327,15 +349,21 @@ function onPreviewClick(e: MouseEvent) {
   }
   if (/^(https?|mailto):/i.test(href)) {
     e.preventDefault()
-    BrowserOpenURL(href).catch(() => {})
+    // wailsjs types BrowserOpenURL as void but it returns a promise at runtime.
+    Promise.resolve(BrowserOpenURL(href)).catch(() => {})
     return
   }
   e.preventDefault()
   if (/\.md\b/i.test(href) && filePath.value) {
+    // Relative links may carry a #fragment and URL-encoded chars; strip the
+    // fragment and decode so `子目录/文件%20名.md#节` resolves on disk.
+    const raw = href.split('#')[0]
+    let rel = raw
+    try { rel = decodeURIComponent(raw) } catch { /* keep raw */ }
     const base = filePath.value.replace(/[\\/][^\\/]*$/, '')
-    const abs = /^[a-zA-Z]:[\\/]/.test(href)
-      ? href
-      : base + '\\' + href.replace(/\//g, '\\')
+    const abs = /^[a-zA-Z]:[\\/]/.test(rel)
+      ? rel
+      : base + '\\' + rel.replace(/\//g, '\\')
     loadPath(abs)
   }
 }
@@ -373,23 +401,31 @@ async function resolveImages() {
     const src = img.getAttribute('src') || ''
     // Leave remote / data / blob URLs alone.
     if (!src || /^(https?:|data:|blob:)/i.test(src)) continue
-    if (img.dataset.loaded === '1') continue
-    img.dataset.loaded = '1'
     const key = filePath.value + '|' + src
+    // The cache also holds '' for known-failed loads, so a missing image file
+    // isn't re-read from disk on every keystroke's re-render.
     const cached = imageCache.get(key)
-    if (cached) {
-      img.src = cached
+    if (cached !== undefined) {
+      if (cached) img.src = cached
       continue
     }
+    // Two <img> can reference the same src within one render pass; only let
+    // the first cross the bridge.
+    if (imageInFlight.has(key)) continue
+    imageInFlight.add(key)
     try {
       const r = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
       if (r.b64) {
         const url = `data:${r.mime};base64,${r.b64}`
         imageCache.set(key, url)
         img.src = url
+      } else {
+        imageCache.set(key, '')
       }
     } catch {
-      // leave broken-image placeholder
+      imageCache.set(key, '')
+    } finally {
+      imageInFlight.delete(key)
     }
   }
 }
@@ -398,6 +434,7 @@ async function resolveImages() {
 function scrollPreviewToLine(line: number) {
   const pv = previewEl.value
   if (!pv) return
+  updateActiveOutline(line)
   const blocks = pv.querySelectorAll<HTMLElement>('[data-source-line]')
   let target: HTMLElement | null = null
   for (const b of Array.from(blocks)) {
@@ -410,6 +447,18 @@ function scrollPreviewToLine(line: number) {
   const pvRect = pv.getBoundingClientRect()
   const tRect = target.getBoundingClientRect()
   pv.scrollTop += tRect.top - pvRect.top - 8
+}
+
+// Highlight the outline entry that contains the given 1-indexed source line,
+// so the outline doubles as a reading-position indicator.
+const activeOutlineLine = ref(0)
+function updateActiveOutline(line: number) {
+  let cur = 0
+  for (const o of outline.value) {
+    if (o.line <= line) cur = o.line
+    else break
+  }
+  if (cur !== activeOutlineLine.value) activeOutlineLine.value = cur
 }
 
 // Split-pane scroll sync, mapped through the data-source-line anchors the
@@ -445,6 +494,7 @@ function onPreviewScroll() {
     if (r.top - pvRect.top <= 12) line = parseInt(b.dataset.sourceLine || '1', 10) || 1
     else break
   }
+  updateActiveOutline(line)
   scrollLockUntil = Date.now() + 60
   const pos = view.state.doc.line(Math.min(line, view.state.doc.lines)).from
   view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 0 }) })
@@ -472,7 +522,12 @@ watch(source, () => {
 
 function onKeydown(e: KeyboardEvent) {
   const k = e.key.toLowerCase()
-  if (e.ctrlKey && !e.shiftKey && !e.altKey) {
+  if (e.ctrlKey && !e.altKey) {
+    if (k === 's' && e.shiftKey) {
+      e.preventDefault()
+      saveAs()
+      return
+    }
     if (k === 's') {
       e.preventDefault()
       save()
@@ -514,6 +569,9 @@ onMounted(async () => {
     editorView.scrollDOM.addEventListener('scroll', onEditorScroll)
   }
   EventsOn('mdview:confirm-exit', () => { exitConfirmVisible.value = true })
+  // A second launch of the exe (another double-clicked file) is routed here
+  // by the single-instance lock in main.go.
+  EventsOn('mdview:open-path', (p: string) => { if (p) loadPath(p) })
   EventsOn('mdview:file-changed', () => {
     if (loadingFile || !filePath.value) return
     if (!dirty.value) {
@@ -526,6 +584,15 @@ onMounted(async () => {
   })
   updateTitle()
   await refreshRecents()
+  // A file passed on the command line (file association / "打开方式") wins
+  // over the last-session restore — opening file A must never show file B.
+  const startupFile = await GetStartupFile().catch(() => '')
+  if (startupFile) {
+    if (!(await loadPath(startupFile))) {
+      status.value = `无法打开：${baseName(startupFile)}`
+    }
+    return
+  }
   // Startup restore: reopen the most recent file; if it vanished from disk,
   // drop it from the list instead of failing on every launch.
   if (recents.value.length > 0) {
@@ -552,7 +619,8 @@ onBeforeUnmount(() => {
   <div class="app" :class="{ dark: theme === 'dark' }">
     <div class="toolbar">
       <button @click="open">打开</button>
-      <button @click="save" :disabled="!filePath">保存</button>
+      <button @click="save">保存</button>
+      <button @click="saveAs">另存为</button>
       <span class="seg">
         <button :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
         <button :class="{ active: viewMode === 'split' }" @click="viewMode = 'split'">分屏</button>
@@ -587,7 +655,7 @@ onBeforeUnmount(() => {
           v-for="(o, i) in outline"
           :key="i"
           class="outline-item"
-          :class="'lv' + o.level"
+          :class="['lv' + o.level, { active: o.line === activeOutlineLine }]"
           :style="{ paddingLeft: (o.level - 1) * 14 + 8 + 'px' }"
           @click="gotoOutline(o)"
         >{{ o.text }}</div>
@@ -697,7 +765,7 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 .outline { flex: 0 0 220px; border-left: 1px solid var(--border); overflow: auto; padding: 8px 0 20px; font-size: 13px; background: var(--panel); }
 .outline-title { font-weight: 600; padding: 4px 10px 8px; color: var(--muted); }
 .outline-item { padding: 3px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
-.outline-item:hover { background: var(--hover); }
+.outline-item:hover, .outline-item.active { background: var(--hover); }
 .outline-item.lv1 { font-weight: 600; }
 .outline-empty { padding: 6px 10px; color: var(--faint); font-size: 12px; }
 .findbar { position: absolute; top: 44px; right: 16px; display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 60; }
@@ -711,6 +779,38 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 .preview table { border-collapse: collapse; }
 .preview th, .preview td { border: 1px solid var(--border); padding: 6px 10px; }
 .preview blockquote { border-left: 4px solid var(--border); margin: 0; padding-left: 14px; color: var(--muted); }
+/* GitHub-style callouts ([!NOTE] etc.). markdown.ts strips the marker line and
+   tags the blockquote with .md-callout--<kind>; the label row is CSS-only. */
+.preview .md-callout {
+  border-left: 4px solid var(--co);
+  background: var(--cb);
+  margin: 12px 0;
+  padding: 10px 14px 10px 12px;
+  border-radius: 4px;
+  color: var(--fg);
+}
+.preview .md-callout > :first-child { margin-top: 0; }
+.preview .md-callout > :last-child { margin-bottom: 0; }
+.preview .md-callout::before {
+  content: var(--label);
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--co);
+  margin-bottom: 4px;
+}
+.preview .md-callout--note      { --co: #0969da; --cb: rgba(9, 105, 218, 0.08);  --label: "Note"; }
+.preview .md-callout--tip       { --co: #1a7f37; --cb: rgba(26, 127, 55, 0.08);  --label: "Tip"; }
+.preview .md-callout--important { --co: #8250df; --cb: rgba(130, 80, 223, 0.08); --label: "Important"; }
+.preview .md-callout--warning   { --co: #9a6700; --cb: rgba(154, 103, 0, 0.10);  --label: "Warning"; }
+.preview .md-callout--caution   { --co: #cf222e; --cb: rgba(207, 34, 46, 0.08);  --label: "Caution"; }
+.app.dark .preview .md-callout--note      { --co: #4493f8; --cb: rgba(68, 147, 248, 0.12); }
+.app.dark .preview .md-callout--tip       { --co: #3fb950; --cb: rgba(63, 185, 80, 0.12); }
+.app.dark .preview .md-callout--important { --co: #ab7df8; --cb: rgba(171, 125, 248, 0.12); }
+.app.dark .preview .md-callout--warning   { --co: #d29922; --cb: rgba(210, 153, 34, 0.14); }
+.app.dark .preview .md-callout--caution   { --co: #f85149; --cb: rgba(248, 81, 73, 0.12); }
 .preview mark.find-hit { background: #ffe066; color: #222; padding: 0 1px; border-radius: 2px; }
 .preview mark.find-hit.find-current { background: #ff9f2e; color: #222; }
 .app.dark .preview mark.find-hit { background: #77641f; color: #fff; }

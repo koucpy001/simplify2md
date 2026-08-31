@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -14,8 +15,11 @@ var assets embed.FS
 func main() {
 	// Create an instance of the app structure
 	app := NewApp()
+	app.SetStartupArgs(os.Args[1:])
 
-	// Create application with options
+	// Create application with options. The single-instance lock routes later
+	// launches (e.g. another double-clicked .md file) into this window via
+	// mdview:open-path instead of spawning a second process window.
 	err := wails.Run(&options.App{
 		Title:  "simplify2md — Markdown",
 		Width:  1400,
@@ -28,6 +32,10 @@ func main() {
 		OnBeforeClose:    app.beforeClose,
 		Bind: []interface{}{
 			app,
+		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               "simplify2md-6f3a9c2e-single-instance",
+			OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
 		},
 	})
 

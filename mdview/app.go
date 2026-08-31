@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/saintfish/chardet"
+	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/traditionalchinese"
@@ -25,17 +27,57 @@ type App struct {
 	ctx context.Context
 	// dirty/forceQuit are written from JS-binding goroutines and read on the
 	// window-close path — atomics keep that cross-thread handoff race-free.
-	dirty          atomic.Bool
-	forceQuit      atomic.Bool
-	watcher        *fsnotify.Watcher
-	watchDone      chan struct{}
-	watchPath      string
+	dirty           atomic.Bool
+	forceQuit       atomic.Bool
+	watcher         *fsnotify.Watcher
+	watchDone       chan struct{}
 	lastSelfWriteNs int64
+	// startupFile holds the path passed on the command line (e.g. by the .md
+	// file association). The frontend reads it once after mount.
+	startupFile string
 }
 
 func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+
+// SetStartupArgs captures the process arguments so the frontend can open the
+// file the OS launched with (double-click, "Open with").
+func (a *App) SetStartupArgs(args []string) {
+	if p, ok := firstExistingFile(args); ok {
+		a.startupFile = p
+	}
+}
+
+// GetStartupFile returns the file path passed on the command line, or "" when
+// the app was launched without one.
+func (a *App) GetStartupFile() string { return a.startupFile }
+
+// onSecondInstanceLaunch routes a second launch's argument (another
+// double-clicked file) into the running window instead of opening a second
+// one; main.go enables the single-instance lock this hook belongs to.
+func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
+	if a.ctx == nil {
+		return
+	}
+	if p, ok := firstExistingFile(data.Args); ok {
+		runtime.EventsEmit(a.ctx, "mdview:open-path", p)
+	}
+}
+
+// firstExistingFile returns the first argument that names an existing file,
+// filtering out flags and vanished paths.
+func firstExistingFile(args []string) (string, bool) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if st, err := os.Stat(arg); err == nil && !st.IsDir() {
+			return arg, true
+		}
+	}
+	return "", false
+}
 
 // SetDirty records the modified flag; beforeClose uses it to guard exit.
 func (a *App) SetDirty(d bool) { a.dirty.Store(d) }
@@ -106,18 +148,60 @@ func (a *App) ReadFileAt(path string) (OpenResult, error) {
 }
 
 // SaveFile writes content back to path in the file's original encoding and
-// newline style, so GBK/Big5/CRLF files round-trip without corruption.
+// newline style, so GBK/Big5/CRLF files round-trip without corruption. The
+// write is atomic (temp file + rename) and records the path as most recent.
 func (a *App) SaveFile(path, content, encoding, newline string) error {
 	if path == "" {
 		return errors.New("no path")
 	}
 	// Own writes are ignored by the file watcher (self-write window).
 	atomic.StoreInt64(&a.lastSelfWriteNs, time.Now().Add(500*time.Millisecond).UnixNano())
-	b, err := encodeContent(applyNewline(content, newline), newline)
+	b, err := encodeContent(applyNewline(content, newline), encoding)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0644)
+	if err := writeFileAtomic(path, b); err != nil {
+		return err
+	}
+	a.recordRecent(path)
+	return nil
+}
+
+// PickSavePath shows a native save dialog and returns the chosen path ("" when
+// cancelled); the frontend then passes it to SaveFile. This backs 另存为 and
+// the first save of an untitled document.
+func (a *App) PickSavePath(defaultName string) (string, error) {
+	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "保存 Markdown",
+		DefaultFilename: defaultName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Markdown", Pattern: "*.md;*.markdown;*.txt"},
+		},
+	})
+}
+
+// writeFileAtomic writes b to path via a temp file in the same directory plus
+// a rename, so a crash mid-write can never leave a truncated file behind.
+func writeFileAtomic(path string, b []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // ---- external file change detection ----
@@ -187,6 +271,10 @@ type ImageData struct {
 	Mime string `json:"mime"`
 }
 
+// maxImageBytes caps what LoadImageForSrc will bridge to the WebView; base64
+// costs ×1.33 memory, and nothing in a Markdown doc needs a bigger payload.
+const maxImageBytes = 32 << 20
+
 // LoadImageForSrc resolves a (possibly relative) image src against the open
 // Markdown file's directory and optional imageRoot, reads the bytes, and
 // returns base64 + mime so the WebView can use a data URL. This mirrors
@@ -196,6 +284,13 @@ func (a *App) LoadImageForSrc(src, mdPath, imageRoot string) (ImageData, error) 
 		return ImageData{}, errors.New("empty src")
 	}
 	abs := resolveImagePath(src, mdPath, imageRoot)
+	st, err := os.Stat(abs)
+	if err != nil {
+		return ImageData{}, err
+	}
+	if st.Size() > maxImageBytes {
+		return ImageData{}, fmt.Errorf("image larger than %d MB: %s", maxImageBytes>>20, abs)
+	}
 	b, err := os.ReadFile(abs)
 	if err != nil {
 		return ImageData{}, err
@@ -255,9 +350,11 @@ func mimeByExt(ext string) string {
 
 // detectEncoding: valid UTF-8 wins; otherwise let chardet pick between
 // GB18030 (covers GBK/GB2312) and Big5. When chardet can't identify a CJK
-// charset, fall back to a GB18030 sanity probe: a clean decode (no
-// replacement chars) is accepted, since nearly all non-UTF-8 Chinese text
-// found in the wild is GBK-family. Final fallback is UTF-8.
+// charset, fall back to a GB18030 sanity probe: GB18030 decodes nearly every
+// byte sequence cleanly, so the probe is only trusted for text-like input —
+// no NUL bytes, and the decoded string must actually contain CJK. Random
+// binary and Western text fall back to UTF-8 instead of being mis-detected
+// (and later re-encoded) as GB18030.
 func detectEncoding(b []byte) string {
 	if utf8.Valid(b) {
 		return "utf-8"
@@ -270,11 +367,23 @@ func detectEncoding(b []byte) string {
 			return "big5"
 		}
 	}
-	if dec, err := simplifiedchinese.GB18030.NewDecoder().Bytes(b); err == nil &&
-		!strings.Contains(string(dec), "\uFFFD") {
-		return "gb18030"
+	if bytes.IndexByte(b, 0) == -1 {
+		if dec, err := simplifiedchinese.GB18030.NewDecoder().Bytes(b); err == nil &&
+			!strings.ContainsRune(string(dec), '\uFFFD') && containsCJK(string(dec)) {
+			return "gb18030"
+		}
 	}
 	return "utf-8"
+}
+
+// containsCJK reports whether s has at least one Han character.
+func containsCJK(s string) bool {
+	for _, r := range s {
+		if (r >= 0x3400 && r <= 0x9FFF) || (r >= 0xF900 && r <= 0xFAFF) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeBytes(b []byte, enc string) string {
@@ -304,8 +413,13 @@ func encodeContent(s, enc string) ([]byte, error) {
 
 // ---- newline detection / conversion ----
 
+// detectNewline picks the dominant line-ending style instead of "any CRLF
+// wins", so an LF file with one stray CRLF keeps LF (only that one line is
+// normalized on save) rather than having the whole file rewritten to CRLF.
 func detectNewline(b []byte) string {
-	if bytes.Contains(b, []byte("\r\n")) {
+	crlf := bytes.Count(b, []byte("\r\n"))
+	lf := bytes.Count(b, []byte("\n")) - crlf
+	if crlf > lf {
 		return "crlf"
 	}
 	return "lf"
