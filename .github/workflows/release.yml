@@ -40,7 +40,11 @@ jobs:
           Add-Content $env:GITHUB_PATH "$(go env GOPATH)\bin"
 
       - name: Install NSIS
-        run: choco install nsis -y --no-progress
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          # choco 修改的是机器级 PATH，当前 job 的后续步骤读不到，需显式追加
+          Add-Content $env:GITHUB_PATH "C:\Program Files (x86)\NSIS"
 
       # -s 跳过 wails 自带的 frontend 步骤（上一步已构建）。
       - name: Build portable exe + NSIS installer
