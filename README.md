@@ -9,14 +9,14 @@
 
 ## 特性
 
-- **完整渲染管线**（移植自 [soloMD](https://github.com/whichonefen/soloMD)）：markdown-it + KaTeX 公式 + highlight.js 代码高亮 + 表格 / 脚注 / 任务列表 / 标题锚点
+- **完整渲染管线**（移植自 [soloMD](https://github.com/whichonefen/soloMD)）：markdown-it + KaTeX 公式 + highlight.js 代码高亮 + 表格 / 脚注 / 任务列表 / 标题锚点 / GitHub 风格 Callout（`[!NOTE]` 等）
 - **mineru / PDF 转换文档兼容**：自动修复 `\\命令`、`\_ {下标}`、`\&`、`\left{` 等 LaTeX 转义污染，多行公式行距按内容分级修正——打开即正常显示，无需手工清理
 - **CodeMirror 6 编辑器**：Markdown 语法高亮、行号、软换行、撤销历史；输入法组词期跳过同步，中文输入不吃字
 - **三种视图**：编辑 / 分屏（双向滚动同步）/ 预览
 - **文内查找**：Ctrl+F 匹配计数，编辑区选中定位 + 预览黄色高亮，F3 循环跳转
-- **大纲导航**：标题抽取，点击直达
-- **编码与换行保真**：自动识别 UTF-8 / GB18030 / Big5，CRLF / LF 按原样写回，不损坏老文件
-- **外部更改检测**：应用外修改自动重载；有未保存改动时弹窗询问
+- **大纲导航**：标题抽取，点击直达，随阅读位置高亮当前标题
+- **编码与换行保真**：自动识别 UTF-8 / GB18030 / Big5，CRLF / LF 按原样写回，不损坏老文件；保存采用临时文件 + 原子替换，中途崩溃也不会写坏原文
+- **文件关联与单实例**：双击 `.md` / `.markdown` 在已有窗口打开；应用外修改自动重载，有未保存改动时弹窗询问
 - **暗色主题 · 字数统计 · 最近文件与启动恢复 · 未保存关闭守卫**
 
 ## 下载安装
@@ -36,6 +36,7 @@ WebView2 运行时 Windows 10/11 自带；缺失时安装版会自动补装。
 | 按键 | 功能 |
 |---|---|
 | `Ctrl+O` / `Ctrl+S` | 打开 / 保存 |
+| `Ctrl+Shift+S` | 另存为（无标题文档首次保存同此） |
 | `Ctrl+F` | 查找（`Enter` 下一个、`Shift+Enter` 上一个） |
 | `F3` / `Shift+F3` | 下一个 / 上一个匹配 |
 | `Esc` | 关闭查找 / 取消弹窗 |
@@ -54,14 +55,16 @@ wails build -nsis    # NSIS 安装包 → build/bin/simplify2md-amd64-installer.
 测试：
 
 ```bash
-go test ./...          # Go 单测：编码检测 / 换行保真 / 图片路径解析
+go test ./...          # Go 单测：编码检测 / 换行保真 / 图片路径解析 / 原子保存
 cd frontend
 npm install
-node node_modules/tsx/dist/cli.mjs test-pipeline.ts   # 渲染管线测试
+npm run build          # 含 vue-tsc 类型检查
+npx tsx test-pipeline.ts   # 渲染管线测试（内置 testdata/fixture.md，开箱可跑）
 ```
 
-> 渲染管线测试依赖本地 `hybrid_auto/` 样本（mineru 转换的真实论文，不入库），
-> 克隆后需自备一份才能运行该脚本。
+> 管线测试自带自包含夹具；若本地存在 `hybrid_auto/` 真实论文样本（不入库），
+> 会额外对它做一轮冒烟渲染。CI（GitHub Actions, windows-latest）自动运行
+> 上述全部检查。
 
 ## 技术栈
 
