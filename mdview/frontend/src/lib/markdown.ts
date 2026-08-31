@@ -13,66 +13,43 @@ import mark from 'markdown-it-mark';
 import cjkFriendly from 'markdown-it-cjk-friendly';
 import * as yaml from 'js-yaml';
 
-// NOTE: `@hedgedoc/markdown-it-task-lists` is installed but unusable here —
-// its compiled ESM entry does `import Token from 'markdown-it/lib/token.js'`
-// which markdown-it@14 no longer exposes as a subpath, so Rollup can't
-// resolve it. We implement the same behaviour inline below as a core rule,
-// which also lets us attach `data-line` in the same pass.
-
-const katexPlugin: any = (katex as any).default ?? katex;
-
-// CJK-friendly emphasis (#262 / Gitee IKA1A0). `**限制：**硬链接` renders as
-// literal asterisks under stock CommonMark, and that shape is everywhere in
-// Chinese writing: a bold run ending in a full-width colon, immediately
-// followed by a Han character — no space, because CJK doesn't use one. The
-// closing `**` is preceded by punctuation and followed by a letter, so it
-// isn't right-flanking and can't close.
-//
-// `markdown-it-cjk-friendly` implements the CommonMark CJK amendment
-// (commonmark/commonmark-spec#650), which reads those clauses as *non-CJK*
-// punctuation. ASCII text keeps stock CommonMark behaviour — `**limit:**hard`
-// stays literal — because nothing CJK is adjacent.
-
-
 // Per-render front-matter capture. markdown-it is synchronous so a
 // module-level variable is safe for sequential calls, but this is NOT
 // concurrent-safe across interleaved renders.
 let lastFrontMatterRaw: string | null = null;
 
-// `html: true` lets users embed inline HTML like
-// `<img src=… style="zoom:50%;">`, `<details>`, `<sub>`, or table HTML for
-// edge cases markdown can't express. CSP in tauri.conf.json is `null` for
-// the local webview, but this app only ever renders the user's own files
-// — no untrusted input — so the security tradeoff is the same as Typora /
-// Obsidian (both ship with HTML on by default). See issue #54.
+const katexPlugin: any = (katex as any).default ?? katex;
+
+// `html: true` lets documents embed inline HTML like
+// `<img src=… style="zoom:50%;">`, `<details>`, `<sub>`, or raw `<table>` —
+// shapes markdown can't express and mineru-style exports emit constantly.
+// This app only ever renders the user's own local files — no untrusted
+// input — the same tradeoff Typora / Obsidian make by default.
 export const md = new MarkdownIt({
   html: true,
   linkify: true,
   typographer: true,
-  // #141 — `breaks` is user-controlled (settings.markdownHardBreaks, default
-  // ON = Typora-like: a single newline renders as a line break). This initial
-  // value matches that default; the live value is synced from the settings
-  // store via setMarkdownHardBreaks() (App.vue watchEffect) on hydration and
-  // on toggle. Before 4.8.10 preview/exports used `false` while the Windows
-  // live editor hardcoded `true` — the app disagreed with itself (#141).
+  // Typora-like: a single newline renders as a line break, which is what
+  // mineru/AI exports and casual notes expect.
   breaks: true,
   highlight: (code: string, lang: string): string => {
-    // Mermaid blocks are handled after-render (processMermaid in Preview.vue)
-    // and must keep the `language-mermaid` class untouched. Return '' so
-    // markdown-it falls through to its default HTML-escape path for this
-    // lang; the class is still emitted via langPrefix on the <code> tag.
+    // Diagram sources (no hljs grammar) render as escaped plain text with the
+    // language class intact rather than getting bogus auto-highlight spans.
     if (lang === 'mermaid') return '';
     if (lang && hljs.getLanguage(lang)) {
       try {
         return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
       } catch {}
     }
-    // Unknown language: let hljs auto-detect for a best-effort highlight.
-    try {
-      return hljs.highlightAuto(code).value;
-    } catch {
-      return '';
+    // Unknown language: hljs auto-detect guesses across dozens of grammars,
+    // which is slow — only afford it on small blocks. Large unknown blocks
+    // render as escaped plain text instead.
+    if (code.length <= AUTO_HIGHLIGHT_MAX) {
+      try {
+        return hljs.highlightAuto(code).value;
+      } catch {}
     }
+    return '';
   },
 })
   // front-matter must run first so it's stripped from the body before
@@ -80,65 +57,24 @@ export const md = new MarkdownIt({
   .use(frontMatter, (fm: string) => {
     lastFrontMatterRaw = fm;
   })
-  .use(anchor, { permalink: false, slugify: (s: string) => slugify(s) })
+  // `permalink: false` trips markdown-it-anchor's narrow typings — the
+  // runtime option is a plain boolean.
+  .use(anchor, { permalink: false, slugify: (s: string) => slugify(s) } as any)
   .use(katexPlugin, { throwOnError: false })
   .use(footnote)
   .use(mark)
   .use(cjkFriendly);
 
-// ---- Wikilink rule (`[[X]]`, `[[X|alias]]`, `[[X#heading]]`) ---------------
-// Used by F1 (v2.0). Renders into <a class="md-wikilink" data-wikilink-target="X">…</a>.
-// Preview.vue intercepts clicks and resolves through the workspace index.
-md.inline.ruler.before('link', 'wikilink', (state, silent) => {
-  const start = state.pos;
-  const src = state.src;
-  if (src.charCodeAt(start) !== 0x5b /* [ */) return false;
-  if (src.charCodeAt(start + 1) !== 0x5b) return false;
-  // Find closing `]]` on the same line. Disallow nested `[`.
-  const max = state.posMax;
-  let i = start + 2;
-  while (i < max - 1) {
-    const ch = src.charCodeAt(i);
-    if (ch === 0x0a) return false; // newline
-    if (ch === 0x5b) return false; // nested [
-    if (ch === 0x5d && src.charCodeAt(i + 1) === 0x5d) {
-      // Found closing ]]
-      const inner = src.slice(start + 2, i).trim();
-      if (!inner) return false;
-      if (silent) {
-        state.pos = i + 2;
-        return true;
-      }
-      // Parse target / heading / alias
-      let target = inner;
-      let alias: string | null = null;
-      let heading: string | null = null;
-      const pipe = target.indexOf('|');
-      if (pipe >= 0) {
-        alias = target.slice(pipe + 1).trim() || null;
-        target = target.slice(0, pipe).trim();
-      }
-      const hash = target.indexOf('#');
-      if (hash >= 0) {
-        heading = target.slice(hash + 1).trim() || null;
-        target = target.slice(0, hash).trim();
-      }
-      const display = alias || (heading ? `${target}#${heading}` : target);
-      const tokOpen = state.push('wikilink_open', 'a', 1);
-      tokOpen.attrSet('class', 'md-wikilink');
-      tokOpen.attrSet('href', '#');
-      tokOpen.attrSet('data-wikilink-target', target);
-      if (heading) tokOpen.attrSet('data-wikilink-heading', heading);
-      const tokText = state.push('text', '', 0);
-      tokText.content = display;
-      state.push('wikilink_close', 'a', -1);
-      state.pos = i + 2;
-      return true;
-    }
-    i++;
-  }
-  return false;
-});
+const AUTO_HIGHLIGHT_MAX = 8192;
+
+// CJK-friendly emphasis. `**限制：**硬链接` renders as literal asterisks
+// under stock CommonMark, and that shape is everywhere in Chinese writing: a
+// bold run ending in a full-width colon, immediately followed by a Han
+// character — no space, because CJK doesn't use one. The closing `**` is
+// preceded by punctuation and followed by a letter, so it isn't
+// right-flanking and can't close. `markdown-it-cjk-friendly` implements the
+// CommonMark CJK amendment (commonmark/commonmark-spec#650); ASCII text
+// keeps stock behaviour.
 
 // ---- Source line mapping for split-pane scroll sync ----
 // Annotate every block-level opening token with `data-source-line` set to
@@ -158,82 +94,6 @@ const BLOCK_OPEN_TYPES = new Set([
   'html_block',
   'math_block',
 ]);
-// v4.3.0 issue #65: wrap each line of a rendered fence in a <span
-// class="cb-line"> so a CSS counter can display line numbers when the
-// `codeBlockLineNumbers` setting is on. The CSS is gated by a
-// `cb-numbered` class added to <pre> here and `cb-numbered-on` on the
-// `.preview-content` root — so flipping the setting is a pure-CSS swap,
-// no re-render needed.
-const defaultFenceRenderer = md.renderer.rules.fence;
-md.renderer.rules.fence = function (tokens, idx, options, env, self) {
-  const html = defaultFenceRenderer
-    ? defaultFenceRenderer(tokens, idx, options, env, self)
-    : self.renderToken(tokens, idx, options);
-  // Skip mermaid — Preview.vue replaces these blocks with rendered SVGs.
-  // Skip tldraw (F7) the same way — Preview.vue swaps the ```tldraw fence for
-  // a static board SVG thumbnail (the language class survives so the
-  // post-processor can find it).
-  const tok = tokens[idx];
-  const info = (tok.info || '').trim().toLowerCase();
-  const lang = info.split(/\s+/)[0];
-  if (lang === 'mermaid' || lang === 'tldraw') return html;
-  // Inject .cb-line wrappers on each line. We do this on the rendered HTML
-  // because the highlight has already produced <span class="hljs-..."> spans
-  // that may straddle multiple lines (a few hljs grammars emit multi-line
-  // comment/string spans). A naive split on '\n' leaves those spans
-  // unbalanced, and the browser then NESTS every later line inside line 1
-  // (#164 — the whole block collapsed into the first numbered row). So we
-  // tokenize: at each newline, close the currently-open spans, emit the line,
-  // and reopen them on the next one — every .cb-line is self-contained.
-  return html.replace(/<code([^>]*)>([\s\S]*?)<\/code>/, (_m, codeAttrs, inner) => {
-    // Strip the trailing newline if any so we don't render an empty
-    // line-numbered row at the end.
-    const trimmed = inner.endsWith('\n') ? inner.slice(0, -1) : inner;
-    const openSpans: string[] = [];
-    let out = '';
-    let line = '';
-    const flush = () => {
-      out += `<span class="cb-line">${line || ' '}</span>`;
-      line = '';
-    };
-    for (const tok of trimmed.match(/<span\b[^>]*>|<\/span>|\n|[^<\n]+|</g) ?? []) {
-      if (tok === '\n') {
-        line += '</span>'.repeat(openSpans.length);
-        flush();
-        out += '\n';
-        line = openSpans.join('');
-      } else if (tok.startsWith('<span')) {
-        openSpans.push(tok);
-        line += tok;
-      } else if (tok === '</span>') {
-        openSpans.pop();
-        line += tok;
-      } else {
-        line += tok;
-      }
-    }
-    flush();
-    return `<code${codeAttrs}>${out}</code>`;
-  })
-    // Add cb-numbered class on the <pre> so CSS can scope the counter.
-    .replace(/<pre>/, '<pre class="cb-numbered">');
-};
-
-// v4.6 — editable display math. Wrap every `$$…$$` block in a container that
-// carries its 1-indexed source line, so Preview.vue can map a double-clicked
-// formula back to its source range and open an inline LaTeX editor (like
-// Tolaria's "editable math source panel"). The default markdown-it-katex
-// math_block renderer doesn't propagate token attrs, so we wrap explicitly.
-const defaultMathBlock = md.renderer.rules.math_block;
-md.renderer.rules.math_block = function (tokens, idx, options, env, self) {
-  const html = defaultMathBlock
-    ? defaultMathBlock(tokens, idx, options, env, self)
-    : self.renderToken(tokens, idx, options);
-  const tok = tokens[idx];
-  const line = tok.map && tok.map.length > 0 ? tok.map[0] + 1 : 0;
-  if (!line) return html;
-  return `<div class="md-math-block" data-source-line="${line}">${html}</div>`;
-};
 
 md.core.ruler.push('source_line_map', (state) => {
   for (const tok of state.tokens) {
@@ -244,10 +104,11 @@ md.core.ruler.push('source_line_map', (state) => {
   }
 });
 
-// Raw HTML blocks render their content verbatim — attrJoin above never reaches
-// the output, so documents built around `<div>…<img>…</div>` containers had no
-// sync anchors at all and the split panes drifted apart across those regions
-// (#203 双栏错位). Wrap the raw block in a neutral div carrying the line.
+// Raw HTML blocks render their content verbatim — the core rule above never
+// reaches their output, so documents built around `<div>…<img>…</div>`
+// containers (typical mineru output) had no sync anchors at all and the
+// split panes drifted apart across those regions. Wrap the raw block in a
+// neutral div carrying the line.
 const defaultHtmlBlock = md.renderer.rules.html_block;
 md.renderer.rules.html_block = function (tokens, idx, options, env, self) {
   const html = defaultHtmlBlock
@@ -263,9 +124,8 @@ md.renderer.rules.html_block = function (tokens, idx, options, env, self) {
 // `[ ]` / `[x]` in the first inline child of a list item) and:
 //   1. add a `task-list-item` class to the <li>
 //   2. replace the `[ ] ` / `[x] ` text prefix with an <input type="checkbox">
-//   3. attach `data-line="N"` (1-indexed source line) to the <li>
-// We also tag the enclosing <ul>/<ol> with `contains-task-list` so
-// integrators can strip bullet markers.
+// We also tag the enclosing <ul>/<ol> with `contains-task-list` so CSS can
+// strip the bullet markers. Checkboxes render disabled — this is a viewer.
 md.core.ruler.after('inline', 'task_lists', (state) => {
   const tokens = state.tokens;
   const TASK_RE = /^\[([ xX])\][ \u00A0]/;
@@ -312,15 +172,13 @@ md.core.ruler.after('inline', 'task_lists', (state) => {
       'class',
       existingClass ? `${existingClass} task-list-item` : 'task-list-item',
     );
-    const line = tok.map && tok.map.length > 0 ? tok.map[0] + 1 : 0;
-    tok.attrSet('data-line', String(line));
 
     // Walk back to find the enclosing list token and tag it.
     for (let k = i - 1; k >= 0; k--) {
       const p = tokens[k];
       if (p.type === 'bullet_list_open' || p.type === 'ordered_list_open') {
         const cls = p.attrGet('class');
-        if (!cls || !/\bcontains-task-list\b/.test(cls)) {
+        if (!cls || !/\bcontains-task-list\b/.test(String(cls))) {
           p.attrSet(
             'class',
             cls ? `${cls} contains-task-list` : 'contains-task-list',
@@ -339,10 +197,9 @@ md.core.ruler.after('inline', 'task_lists', (state) => {
 // GitHub-style callouts: a blockquote whose first line is `[!NOTE]` (or TIP /
 // IMPORTANT / WARNING / CAUTION) renders as a tinted callout card with a
 // label row — the syntax GitHub and Obsidian users expect to just work. The
-// marker line is stripped; the label/icon comes from CSS (`.md-callout`) so
-// every consumer of the rendered HTML (preview, live blocks, print overlay)
-// styles it without extra plumbing. Unknown `[!TYPES]` are left as plain
-// blockquote text on purpose.
+// marker line is stripped; the label/icon comes from CSS (`.md-callout` in
+// App.vue) so the markup stays free of presentation. Unknown `[!TYPES]` are
+// left as plain blockquote text on purpose.
 md.core.ruler.after('inline', 'github_callouts', (state) => {
   const tokens = state.tokens;
   const CALLOUT_RE = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*/i;
@@ -439,7 +296,7 @@ function renderFrontMatterHtml(raw: string): string {
 // without blank-line separators, which makes markdown-it treat the chunk as
 // a code block (4-space indent) or escape it as inline HTML inside a
 // paragraph. The preprocessor pulls these tags back to column 0 and inserts
-// blank lines around them so the HTML-block rule fires. See issue #71.
+// blank lines around them so the HTML-block rule fires.
 const HTML_BLOCK_PASSTHROUGH_TAGS = [
   'table',
   'div',
@@ -628,7 +485,7 @@ function normalizeTableDelimiters(source: string): string {
 }
 
 /**
- * #132 — re-indent nested list items to consistent 2-space steps.
+ * Re-indent nested list items to consistent 2-space steps.
  *
  * CommonMark turns content indented ≥4 spaces past its list item's content
  * column into an *indented code block*. So a sub-list a user typed with a Tab
@@ -648,12 +505,12 @@ function normalizeListIndent(source: string): string {
   };
   const lines = source.split('\n');
   const out: string[] = [];
-  // #213 — track each level's `markerWidth` (marker glyph + trailing spaces)
-  // so a nested item re-indents under its PARENT's content column instead of a
+  // Track each level's `markerWidth` (marker glyph + trailing spaces) so a
+  // nested item re-indents under its PARENT's content column instead of a
   // fixed 2-space step. Ordered markers are 3+ chars wide (`1. `, `10. `), and
   // CommonMark only nests a child when it's indented by at least the parent
-  // marker width — the old flat +2 left ordered sublists under-indented, so
-  // markdown-it flattened them into siblings.
+  // marker width — a flat +2 would leave ordered sublists under-indented, so
+  // markdown-it flattens them into siblings.
   const stack: { orig: number; norm: number; markerWidth: number }[] = [];
   let inFence = false;
   let fenceChar = '';
@@ -723,84 +580,12 @@ function normalizeListIndent(source: string): string {
   return out.join('\n');
 }
 
-/** #141 — flip the global soft-newline behavior (preview, exports, live
- *  editor all share the `md` singleton). Called by the settings store sync. */
-export function setMarkdownHardBreaks(on: boolean): void {
-  md.set({ breaks: on });
-}
-
-// #216 — `typographer: true` also enables markdown-it's `smartquotes` rule,
-// which rewrites straight quotes to curly ones (' → U+2019). Fonts that
-// resolve U+2019 through a CJK fallback draw it fullwidth, so "test's"
-// renders as "test'　s" — reported as "extra space after the apostrophe",
-// and the preview stops matching the typed source. Curly quotes are opt-in
-// now (settings.smartQuotes); the rest of typographer ((c) → ©, --- → —,
-// ellipsis) is unaffected.
+// `typographer: true` also enables markdown-it's `smartquotes` rule, which
+// rewrites straight quotes to curly ones (' → U+2019). Fonts that resolve
+// U+2019 through a CJK fallback draw it fullwidth, so "test's" renders as
+// "test'　s" and the preview stops matching the typed source. Keep straight
+// quotes straight; the rest of typographer ((c) → ©, --- → —, ellipsis) stays.
 md.disable('smartquotes');
-
-/** #216 — toggle curly-quote substitution; synced from the settings store. */
-export function setMarkdownSmartQuotes(on: boolean): void {
-  if (on) md.enable('smartquotes');
-  else md.disable('smartquotes');
-}
-
-// ---- Numbered-section auto-headings (opt-in setting) ----------------------
-// Chinese reports / 公文 often write section numbers as plain text —
-// `6.2 出口许可证管理目录` — with no `#`, so neither markdown-it nor Typora
-// treat them as headings (a heading needs `#` + space; a bare number is just
-// text). When the `markdownAutoNumberHeadings` setting is on we promote such
-// lines to headings whose level tracks the numbering depth (`6.2` → h2,
-// `6.2.1` → h3). Default OFF because auto-promotion is inherently heuristic
-// (a line like `3.14 是圆周率` starts with a decimal too), so the user opts in.
-let autoNumberHeadings = false;
-
-/** Sync the numbered-heading toggle from the settings store. */
-export function setMarkdownAutoNumberHeadings(on: boolean): void {
-  autoNumberHeadings = on;
-}
-
-// Require ≥2 dot-joined numeric segments (`6.2`, `6.2.1`) so single-number
-// sentences ("6 个要点") and ordered-list markers (`1.`) are never touched.
-const NUMBERED_HEADING_RE = /^(\d+(?:\.\d+)+)\.?[ \t]+(\S.*?)\s*$/;
-// Lines whose text ends in sentence punctuation are prose that merely opens
-// with a decimal, not a section title — leave them alone.
-const SENTENCE_END_RE = /[。．.！？!?，,；;、]$/;
-
-function numberedSectionHeadings(source: string): string {
-  const lines = source.split('\n');
-  const out: string[] = [];
-  let inFence = false;
-  let fenceChar = '';
-  const fenceRe = /^(\s*)(```+|~~~+)/;
-  for (const line of lines) {
-    const fm = fenceRe.exec(line);
-    if (fm) {
-      if (!inFence) {
-        inFence = true;
-        fenceChar = fm[2][0];
-        out.push(line);
-        continue;
-      }
-      if (fm[2][0] === fenceChar) {
-        inFence = false;
-        out.push(line);
-        continue;
-      }
-    }
-    if (inFence) {
-      out.push(line);
-      continue;
-    }
-    const m = NUMBERED_HEADING_RE.exec(line);
-    if (m && !SENTENCE_END_RE.test(m[2])) {
-      const depth = Math.min(6, m[1].split('.').length);
-      out.push(`${'#'.repeat(depth)} ${m[1]} ${m[2]}`);
-      continue;
-    }
-    out.push(line);
-  }
-  return out.join('\n');
-}
 
 /**
  * mineru / PDF-export escaping repair. mineru writes LaTeX with
@@ -909,31 +694,20 @@ function normalizeMathEscapes(source: string): string {
 
 /**
  * Run the source through every leniency preprocessor (inline-HTML-block
- * unwrapping #71, malformed table-delimiter repair, list re-indent #132) that
- * makes AI/PDF-exported Markdown render like Typora/Obsidian. Both the HTML
- * render path (`renderMarkdown`) and the DOCX token path (`markdownToDocxBlob`
- * via `md.parse`) must apply this identically, so it lives here as the single
- * source of truth. The numbered-section step is gated behind its opt-in
- * setting.
+ * unwrapping, malformed table-delimiter repair, list re-indent) that makes
+ * AI/PDF-exported Markdown render like Typora/Obsidian.
  */
-export function preprocessMarkdown(source: string): string {
+function preprocessMarkdown(source: string): string {
   let s = normalizeTableDelimiters(unwrapInlineHtmlBlocks(source || ''));
   s = normalizeMathEscapes(s);
-  if (autoNumberHeadings) s = numberedSectionHeadings(s);
   return normalizeListIndent(s);
 }
 
-export function renderMarkdown(source: string, options?: { breaks?: boolean }): string {
+export function renderMarkdown(source: string): string {
   lastFrontMatterRaw = null;
   const normalized = preprocessMarkdown(source);
-  const prevBreaks = md.options.breaks;
-  if (options?.breaks !== undefined) md.set({ breaks: options.breaks });
   let body = '';
-  try {
-    body = md.render(normalized);
-  } finally {
-    if (options?.breaks !== undefined) md.set({ breaks: prevBreaks });
-  }
+  body = md.render(normalized);
   if (lastFrontMatterRaw !== null) {
     const fmHtml = renderFrontMatterHtml(lastFrontMatterRaw);
     lastFrontMatterRaw = null;
