@@ -26,16 +26,18 @@ jobs:
           cache: npm
           cache-dependency-path: mdview/frontend/package-lock.json
 
-      - name: Go vet + test
-        run: |
-          go vet ./...
-          go test ./...
-
       - name: Frontend typecheck + build
         working-directory: mdview/frontend
         run: |
           npm ci
           npm run build
+
+      # go:embed all:frontend/dist requires dist to exist, so the frontend
+      # must be built before Go compiles.
+      - name: Go vet + test
+        run: |
+          go vet ./...
+          go test ./...
 
       - name: Render pipeline test
         working-directory: mdview/frontend
