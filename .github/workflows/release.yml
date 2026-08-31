@@ -1,0 +1,73 @@
+name: Release
+
+# 推送 v* 标签触发：runner 上全新构建便携版 + NSIS 安装包，发布 GitHub Release。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整历史：生成上一标签以来的更新日志
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: mdview/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mdview/frontend/package-lock.json
+
+      - name: Frontend typecheck + build
+        working-directory: mdview/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+          Add-Content $env:GITHUB_PATH "$(go env GOPATH)\bin"
+
+      # -s 跳过 wails 自带的 frontend 步骤（上一步已构建）；
+      # NSIS 在 windows-latest 镜像中预装。
+      - name: Build portable exe + NSIS installer
+        run: wails build -nsis -s
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          {
+            echo "## 下载"
+            echo ""
+            echo "| 文件 | 说明 |"
+            echo "|---|---|"
+            echo "| \`simplify2md-amd64-installer.exe\` | 安装版：开始菜单/桌面快捷方式、卸载器、注册 .md/.markdown 文件关联 |"
+            echo "| \`simplify2md.exe\` | 便携版：单文件，拷贝即用 |"
+            echo ""
+            echo "两个版本均未签名，首次运行如遇 SmartScreen 提示，选择“更多信息 → 仍要运行”。WebView2 运行时 Windows 10/11 自带。"
+            echo ""
+            echo "## 更新内容"
+            echo ""
+            prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+            if [ -n "$prev" ]; then
+              git log --pretty=format:'- %s' "$prev..$GITHUB_REF_NAME"
+            else
+              git log --pretty=format:'- %s' "$GITHUB_REF_NAME"
+            fi
+          } > release-notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" mdview/build/bin/simplify2md.exe mdview/build/bin/simplify2md-amd64-installer.exe --title "simplify2md $env:GITHUB_REF_NAME" --notes-file release-notes.md --latest
