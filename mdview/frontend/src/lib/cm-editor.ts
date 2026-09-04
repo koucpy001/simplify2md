@@ -17,7 +17,7 @@ import {
   crosshairCursor,
   placeholder,
 } from '@codemirror/view'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import {
   syntaxHighlighting,
@@ -106,5 +106,12 @@ export function setEditorHighlight(view: EditorView, dark: boolean) {
 
 export function replaceEditorDoc(view: EditorView, text: string) {
   if (view.state.doc.toString() === text) return
-  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } })
+  // Replace the whole document as an isolated history event so a subsequent
+  // Ctrl+Z restores nothing from the previous file (otherwise opening a new file
+  // then undoing would resurrect the old file's content and risk writing it to
+  // the new path).
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+    annotations: isolateHistory.of('full'),
+  })
 }

@@ -12,6 +12,7 @@ import frontMatter from 'markdown-it-front-matter';
 import mark from 'markdown-it-mark';
 import cjkFriendly from 'markdown-it-cjk-friendly';
 import * as yaml from 'js-yaml';
+import DOMPurify from 'dompurify';
 
 // Per-render front-matter capture. markdown-it is synchronous so a
 // module-level variable is safe for sequential calls, but this is NOT
@@ -651,12 +652,20 @@ function normalizeMathEscapes(source: string): string {
   const unescapeLine = (line: string): string => {
     const parts = line.split('`');
     if (parts.length < 2) return applyRules(line);
+    // An odd number of backticks means a span is unterminated — there is no
+    // valid inline-code segment, so keep the backtick(s) literal and apply the
+    // escape-repair rules to the whole line. This also avoids the previous crash
+    // where the dangling tail index was undefined / a second backtick was
+    // injected.
+    if (parts.length % 2 === 0) return applyRules(line);
     let out = '';
-    let i = 0;
-    for (; i + 1 < parts.length; i += 2) {
+    for (let i = 0; i + 1 < parts.length; i += 2) {
       out += applyRules(parts[i]) + '`' + parts[i + 1] + '`';
     }
-    return out + applyRules(parts[i]);
+    // `parts.length` is odd here, so the loop leaves exactly one unpaired tail
+    // segment (a real string), never an undefined index.
+    out += applyRules(parts[parts.length - 1]);
+    return out;
   };
   const fenceRe = /^(\s*)(```+|~~~+)/;
   let inFence = false;
@@ -703,15 +712,43 @@ function preprocessMarkdown(source: string): string {
   return normalizeListIndent(s);
 }
 
+// XSS hardening. With `html: true` markdown-it passes raw HTML through
+// verbatim, so a malicious document's `<img onerror=…>` would execute inside the
+// WebView and could drive the Wails bindings (arbitrary file read/write). We
+// sanitize the rendered markup before it ever reaches `v-html`.
+//
+// In the browser (Wails/WebView2) a real DOM is present, so DOMPurify strips
+// event handlers and the dangerous tags below. Under Node (the pipeline test
+// harness has no DOM) DOMPurify degrades to a no-op, so a minimal equivalent
+// strip keeps the security invariant honest and testable without adding a DOM
+// dep. Both paths keep `class`/`id`/`data-*` and styling intact, so the
+// fixture assertions (task-list-item, md-callout, hljs-keyword, mark, input
+// checkbox, …) are unaffected.
+const SANITIZE_FORBID_TAGS = ['script', 'iframe', 'object', 'embed', 'form'];
+
+function sanitizeHtml(html: string): string {
+  try {
+    if (typeof DOMPurify.sanitize === 'function') {
+      return DOMPurify.sanitize(html, { FORBID_TAGS: SANITIZE_FORBID_TAGS });
+    }
+  } catch {
+    /* no DOM available — fall through to the regex strip below */
+  }
+  return html
+    .replace(/\son[a-z]+\s*=\s*"(?:[^"]*)"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'(?:[^']*)'/gi, '')
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '')
+    .replace(/<\/?(?:script|iframe|object|embed|form)\b[^>]*>/gi, '');
+}
+
 export function renderMarkdown(source: string): string {
   lastFrontMatterRaw = null;
   const normalized = preprocessMarkdown(source);
-  let body = '';
-  body = md.render(normalized);
+  const body = sanitizeHtml(md.render(normalized));
   if (lastFrontMatterRaw !== null) {
     const fmHtml = renderFrontMatterHtml(lastFrontMatterRaw);
     lastFrontMatterRaw = null;
-    return fmHtml + body;
+    return sanitizeHtml(fmHtml) + body;
   }
   return body;
 }
@@ -747,18 +784,42 @@ export function extractOutline(source: string): OutlineItem[] {
   const lines = source.split('\n');
   const items: OutlineItem[] = [];
   let inFence = false;
+  // Front matter (`---` … `---`) is not part of the document body: its closing
+  // `---` would otherwise be misread as a level-2 setext heading.
+  let inFrontMatter = lines.length > 0 && /^---\s*$/.test(lines[0]);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/^```/.test(line)) {
+    if (inFrontMatter) {
+      // Stay in front matter until the closing `---` (never the opening line).
+      if (i > 0 && /^---\s*$/.test(line)) inFrontMatter = false;
+      continue;
+    }
+    // Fence toggle must match the rest of the pipeline: both ``` and ~~~.
+    const fence = /^(\s*)(```+|~~~+)/.exec(line);
+    if (fence) {
       inFence = !inFence;
       continue;
     }
     if (inFence) continue;
+    // ATX heading: `#` … `######`.
     const m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
     if (m) {
       const level = m[1].length;
       const text = m[2];
       items.push({ level, text, slug: slugify(text), line: i + 1 });
+      continue;
+    }
+    // Setext heading: the current line is the title, the next line is `===`
+    // (level 1) or `---` (level 2). Conservatively require the title line to be
+    // non-empty and not a table row (contains `|`), and only the `---`/`===`
+    // underline form (a thematic break on its own line is not a heading).
+    const next = lines[i + 1];
+    if (next !== undefined && /^(?:=+|-+)\s*$/.test(next)) {
+      const title = line.trim();
+      if (title && !title.includes('|')) {
+        const level = /^-+\s*$/.test(next.trim()) ? 2 : 1;
+        items.push({ level, text: title, slug: slugify(title), line: i + 1 });
+      }
     }
   }
   return items;

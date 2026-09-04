@@ -37,6 +37,8 @@ let renderTimer: ReturnType<typeof setTimeout> | null = null
 let loadingFile = false
 const exitConfirmVisible = ref(false)
 const fileChangedVisible = ref(false)
+const switchConfirmVisible = ref(false)
+const pendingSwitchAction = ref<(() => void) | null>(null)
 const stats = ref({ words: 0, chars: 0 })
 
 // View mode / outline / theme, persisted per-app via localStorage.
@@ -64,6 +66,7 @@ const findVisible = ref(false)
 const findText = ref('')
 const matchPositions = ref<number[]>([])
 const matchIndex = ref(0)
+const findCapped = ref(false)
 const findInputEl = ref<HTMLInputElement | null>(null)
 
 function computeMatches() {
@@ -164,7 +167,10 @@ function applyFindHighlights() {
   if (!root) return
   clearFindHighlights()
   const q = findText.value
-  if (!findVisible.value || !q) return
+  if (!findVisible.value || !q) {
+    findCapped.value = false
+    return
+  }
   const needle = q.toLowerCase()
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node) {
@@ -180,7 +186,12 @@ function applyFindHighlights() {
   const targets: Text[] = []
   let n: Node | null
   while ((n = walker.nextNode())) targets.push(n as Text)
+  // Cap the number of wrapped <mark> elements so a huge document can't freeze
+  // the UI building thousands of nodes. Once we hit the cap we stop wrapping and
+  // surface "500+" in the find counter.
+  const MAX_MARKS = 500
   let k = 0
+  let capped = false
   for (const node of targets) {
     const text = node.nodeValue || ''
     const lower = text.toLowerCase()
@@ -188,6 +199,10 @@ function applyFindHighlights() {
     let last = 0
     let idx = lower.indexOf(needle)
     while (idx !== -1) {
+      if (k >= MAX_MARKS) {
+        capped = true
+        break
+      }
       if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)))
       const mark = document.createElement('mark')
       mark.className = k === matchIndex.value ? 'find-hit find-current' : 'find-hit'
@@ -197,9 +212,16 @@ function applyFindHighlights() {
       last = idx + needle.length
       idx = lower.indexOf(needle, last)
     }
+    if (capped) {
+      // Flush the remainder of this node as plain text, then stop entirely.
+      frag.appendChild(document.createTextNode(text.slice(last)))
+      node.parentNode?.replaceChild(frag, node)
+      break
+    }
     if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
     node.parentNode?.replaceChild(frag, node)
   }
+  findCapped.value = capped
 }
 
 function markCurrentHit() {
@@ -263,13 +285,42 @@ async function loadPath(path: string): Promise<boolean> {
   }
 }
 
-async function open() {
+async function openFileDialog() {
   try {
     applyLoaded(await OpenFile())
   } catch (e: any) {
     // Dialog cancel is a normal user action, not an error.
     if (!/cancelled/i.test(String(e))) status.value = String(e)
   }
+}
+
+// A document switch (recent dropdown, second-instance open-path, preview .md
+// link, or the open dialog) must not silently discard unsaved edits. When the
+// current doc is dirty we ask for confirmation and defer the switch; the startup
+// restore path and reloadFromDisk manage their own modals and skip this guard.
+function requestSwitch(action: () => void) {
+  if (!dirty.value) {
+    action()
+    return
+  }
+  pendingSwitchAction.value = action
+  switchConfirmVisible.value = true
+}
+
+function confirmSwitch() {
+  const action = pendingSwitchAction.value
+  pendingSwitchAction.value = null
+  switchConfirmVisible.value = false
+  if (action) action()
+}
+
+function cancelSwitch() {
+  pendingSwitchAction.value = null
+  switchConfirmVisible.value = false
+}
+
+async function open() {
+  requestSwitch(() => { void openFileDialog() })
 }
 
 async function save() {
@@ -328,7 +379,7 @@ function onRecentChange(e: Event) {
   const sel = e.target as HTMLSelectElement
   const p = sel.value
   sel.selectedIndex = 0
-  if (p) loadPath(p)
+  if (p) requestSwitch(() => { void loadPath(p) })
 }
 
 // Route link clicks in the preview. The WebView itself must never navigate
@@ -354,7 +405,7 @@ function onPreviewClick(e: MouseEvent) {
     return
   }
   e.preventDefault()
-  if (/\.md\b/i.test(href) && filePath.value) {
+  if (/\.md(?:ark)?\b/i.test(href) && filePath.value) {
     // Relative links may carry a #fragment and URL-encoded chars; strip the
     // fragment and decode so `子目录/文件%20名.md#节` resolves on disk.
     const raw = href.split('#')[0]
@@ -364,7 +415,7 @@ function onPreviewClick(e: MouseEvent) {
     const abs = /^[a-zA-Z]:[\\/]/.test(rel)
       ? rel
       : base + '\\' + rel.replace(/\//g, '\\')
-    loadPath(abs)
+    requestSwitch(() => { void loadPath(abs) })
   }
 }
 
@@ -373,9 +424,16 @@ function onPreviewClick(e: MouseEvent) {
 function render() {
   const el = previewEl.value
   const st = el ? el.scrollTop : 0
-  previewHtml.value = renderMarkdown(source.value)
-  outline.value = extractOutline(source.value)
-  computeStats(source.value)
+  try {
+    previewHtml.value = renderMarkdown(source.value)
+    outline.value = extractOutline(source.value)
+    computeStats(source.value)
+  } catch (e: unknown) {
+    // Keep the previous preview intact so the user doesn't lose context; just
+    // surface a short, non-fatal error in the status bar.
+    status.value = '渲染出错: ' + (e instanceof Error ? e.message : String(e))
+    return
+  }
   nextTick(() => {
     if (el) el.scrollTop = st
     resolveImages()
@@ -571,7 +629,7 @@ onMounted(async () => {
   EventsOn('mdview:confirm-exit', () => { exitConfirmVisible.value = true })
   // A second launch of the exe (another double-clicked file) is routed here
   // by the single-instance lock in main.go.
-  EventsOn('mdview:open-path', (p: string) => { if (p) loadPath(p) })
+  EventsOn('mdview:open-path', (p: string) => { if (p) requestSwitch(() => { void loadPath(p) }) })
   EventsOn('mdview:file-changed', () => {
     if (loadingFile || !filePath.value) return
     if (!dirty.value) {
@@ -671,7 +729,7 @@ onBeforeUnmount(() => {
         @keydown.esc.stop="closeFind"
       />
       <span class="find-count">
-        {{ findText ? (matchPositions.length ? (matchIndex + 1) + '/' + matchPositions.length : '无结果') : '' }}
+        {{ findText ? (matchPositions.length ? (findCapped ? '500+' : (matchIndex + 1) + '/' + matchPositions.length) : '无结果') : '' }}
       </span>
       <button title="上一个 (Shift+F3)" @click="findNext(true)">↑</button>
       <button title="下一个 (F3 / Enter)" @click="findNext(false)">↓</button>
@@ -697,6 +755,16 @@ onBeforeUnmount(() => {
         <div class="modal-actions">
           <button @click="reloadFromDisk">重新加载</button>
           <button @click="fileChangedVisible = false">忽略</button>
+        </div>
+      </div>
+    </div>
+    <div v-if="switchConfirmVisible" class="modal-mask">
+      <div class="modal">
+        <div class="modal-title">未保存的修改</div>
+        <div class="modal-body">当前文档有未保存的修改，打开其他文件将放弃这些修改。</div>
+        <div class="modal-actions">
+          <button @click="confirmSwitch">继续打开</button>
+          <button @click="cancelSwitch">取消</button>
         </div>
       </div>
     </div>

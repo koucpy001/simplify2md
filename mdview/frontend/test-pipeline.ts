@@ -72,6 +72,52 @@ if (existsSync(sample)) {
   console.log('\nsample: hybrid_auto file not present (optional), skipped')
 }
 
+// ---- adversarial regression cases ----
+// Odd number of backticks must not crash the pipeline (CRITICAL-2).
+let oddOk = true
+try {
+  renderMarkdown('a ` b')
+  renderMarkdown('按下 ` 键')
+} catch {
+  oddOk = false
+}
+check('adversarial: odd backtick count does not throw', oddOk)
+
+// A `~~~` fence must hide inner ATX headings from the outline (MINOR, task 6).
+const tildeSrc = '~~~\n# hidden\n~~~\n# visible\n'
+const tildeOutline = extractOutline(tildeSrc)
+check(
+  'adversarial: ~~~ fence inner heading excluded',
+  !tildeOutline.some((o) => o.text === 'hidden') &&
+    tildeOutline.some((o) => o.text === 'visible'),
+)
+
+// Setext headings (`===` / `---`) must be extracted (MINOR, task 6).
+const setextSrc = 'Title One\n===\n\nTitle Two\n---\n'
+const setextOutline = extractOutline(setextSrc)
+check(
+  'adversarial: setext === heading extracted',
+  setextOutline.some((o) => o.text === 'Title One' && o.level === 1),
+)
+check(
+  'adversarial: setext --- heading extracted',
+  setextOutline.some((o) => o.text === 'Title Two' && o.level === 2),
+)
+
+// An unclosed `<table>` must not hang or throw — it should render to output.
+let tableOk = true
+let tableHtml = ''
+try {
+  tableHtml = renderMarkdown('before\n<table>\nafter')
+} catch {
+  tableOk = false
+}
+check('adversarial: unclosed <table> renders without throwing', tableOk && tableHtml.length > 0)
+
+// DOMPurify must strip event handlers from embedded HTML (CRITICAL-1).
+const xssHtml = renderMarkdown('<img src=x onerror=alert(1)>')
+check('adversarial: DOMPurify strips onerror handler', !/onerror/i.test(xssHtml))
+
 if (failures) {
   console.error(`\n${failures} check(s) FAILED`)
   process.exit(1)
