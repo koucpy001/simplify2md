@@ -42,7 +42,7 @@ let editorView: EditorView | null = null
 // '' means a known-failed load — the entry counts toward the budget and is
 // never retried, so a missing image isn't re-read from disk on every re-render.
 const imageCache = new LruCache()
-const imageInFlight = new Set<string>()
+const imageInFlight = new Map<string, Promise<void>>()
 let renderTimer: ReturnType<typeof setTimeout> | null = null
 let loadingFile = false
 const exitConfirmVisible = ref(false)
@@ -910,6 +910,9 @@ function resolveImages() {
   // targets would be dead nodes — disconnect and re-register every render
   // (METIS#18).
   imageObserver?.disconnect()
+  if (!imageObserver) {
+    imageObserver = new IntersectionObserver(onImageIntersect, { rootMargin: '200px' })
+  }
   const pending: HTMLImageElement[] = []
   for (const img of Array.from(root.querySelectorAll<HTMLImageElement>('img'))) {
     // Placeholder image from an earlier pass on the SAME dom (Vue keeps nodes
@@ -930,17 +933,19 @@ function resolveImages() {
     }
     pending.push(img)
   }
-  if (!pending.length) return
-  if (!imageObserver) {
-    imageObserver = new IntersectionObserver(onImageIntersect, { rootMargin: '200px' })
-  }
+  // Register (or re-observe — disconnect() above dropped every previous
+  // registration) all viewport-below images. The re-observe case matters when
+  // Vue kept the same DOM across a re-render: without it those placeholders
+  // would never hydrate. Already-registered images keep their id/lazySrc and
+  // are only re-observed.
   for (const img of pending) {
-    if (img.dataset.lazy && img.dataset.lazySrc) continue // already registered
-    lazyImageSeq++
-    img.dataset.lazy = String(lazyImageSeq)
-    // The original relative path survives the placeholder swap here.
-    img.dataset.lazySrc = img.getAttribute('src') || ''
-    img.src = LAZY_PLACEHOLDER
+    if (!img.dataset.lazy) {
+      lazyImageSeq++
+      img.dataset.lazy = String(lazyImageSeq)
+      // The original relative path survives the placeholder swap here.
+      img.dataset.lazySrc = img.getAttribute('src') || ''
+      img.src = LAZY_PLACEHOLDER
+    }
     imageObserver.observe(img)
   }
 }
@@ -964,33 +969,59 @@ async function hydrateImage(img: HTMLImageElement) {
   const src = img.dataset.lazySrc || ''
   if (!src) return
   const key = filePath.value + '|' + src
-  // Two <img> can reference the same src within one render pass; only let
-  // the first cross the bridge.
-  if (imageInFlight.has(key)) return
-  imageInFlight.add(key)
-  try {
-    const r = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
-    if (r.b64) {
-      const url = `data:${r.mime};base64,${r.b64}`
-      imageCache.set(key, url)
-      // The awaited node may have been replaced by a re-render in the
-      // meantime — assign only if this registration is still alive. A
-      // detached assignment is lost, but the cache hit restores it on the
-      // next render (self-heal semantics kept from the eager loader).
-      const cur = previewEl.value?.querySelector<HTMLImageElement>(
-        `img[data-lazy="${img.dataset.lazy}"]`,
-      )
-      if (cur && cur.dataset.lazySrc === src) {
-        delete cur.dataset.lazy
-        cur.src = url
+  // Already cached (e.g. loaded for a sibling node): skip the bridge entirely.
+  if (imageCache.get(key) !== undefined) {
+    applyImageResult(img, key, src)
+    return
+  }
+  // Same-src images hydrate concurrently; dedupe the BRIDGE CALL but not the
+  // node fill-in: waiters wait for the shared fetch, then every caller fills
+  // its own node. (A plain early-return here left the 2nd..nth same-src image
+  // stuck on the 1×1 placeholder forever — the visible "images don't show"
+  // regression.)
+  let fetchPromise: Promise<void>
+  if (imageInFlight.has(key)) {
+    fetchPromise = imageInFlight.get(key)!
+  } else {
+    fetchPromise = (async () => {
+      try {
+        const r = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
+        if (r.b64) {
+          imageCache.set(key, `data:${r.mime};base64,${r.b64}`)
+        } else {
+          imageCache.set(key, '')
+        }
+      } catch {
+        imageCache.set(key, '')
       }
-    } else {
-      imageCache.set(key, '')
-    }
-  } catch {
-    imageCache.set(key, '')
+    })()
+    imageInFlight.set(key, fetchPromise)
+  }
+  try {
+    await fetchPromise
   } finally {
-    imageInFlight.delete(key)
+    // Only the caller that started the fetch removes the map entry; waiters
+    // must not clear it while the fetch is still delivering.
+    if (imageInFlight.get(key) === fetchPromise) imageInFlight.delete(key)
+  }
+  const url = imageCache.get(key) || ''
+  if (!url) return // known-failed load; keep the placeholder
+  applyImageResult(img, key, src)
+}
+
+// Fill the hydrated data URL into the registered node, tolerating a re-render
+// that replaced the awaited node (re-query by registration id; a detached
+// assignment is lost, but the cache hit restores it on the next render).
+function applyImageResult(img: HTMLImageElement, key: string, src: string) {
+  const url = imageCache.get(key) || ''
+  if (!url) return
+  const cur = previewEl.value?.querySelector<HTMLImageElement>(
+    `img[data-lazy="${img.dataset.lazy}"]`,
+  )
+  if (cur && cur.dataset.lazySrc === src) {
+    delete cur.dataset.lazy
+    delete cur.dataset.lazySrc
+    cur.src = url
   }
 }
 

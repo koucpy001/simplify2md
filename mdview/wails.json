@@ -17,7 +17,7 @@
         "iconName": "md"
       }
     ],
-    "productVersion": "0.2.0"
+    "productVersion": "0.2.1"
   },
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
