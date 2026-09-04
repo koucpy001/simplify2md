@@ -11,6 +11,9 @@ mdview/build/bin/
 *.log
 .ferrite/
 
+# 本地工作记录（记忆库、计划等，永不推送）
+.omo/
+
 # NSIS 构建时下载的临时文件
 mdview/build/windows/installer/tmp/
 
