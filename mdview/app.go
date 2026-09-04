@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -27,11 +28,22 @@ type App struct {
 	ctx context.Context
 	// dirty/forceQuit are written from JS-binding goroutines and read on the
 	// window-close path — atomics keep that cross-thread handoff race-free.
-	dirty           atomic.Bool
-	forceQuit       atomic.Bool
-	watcher         *fsnotify.Watcher
-	watchDone       chan struct{}
-	lastSelfWriteNs int64
+	dirty     atomic.Bool
+	forceQuit atomic.Bool
+	// watcher/watchDone are written from Wails binding goroutines
+	// (startWatching/stopWatching) and must be guarded by watchMu to avoid a
+	// concurrent read/write or a double close.
+	watcher   *fsnotify.Watcher
+	watchDone chan struct{}
+	watchMu   sync.Mutex
+	// lastSelfWriteNs marks a self-write window (Unix nanos) so the file
+	// watcher ignores our own saves. atomic.Int64 keeps access race-free.
+	lastSelfWriteNs atomic.Int64
+	// allowedWrites is the set of paths the user has explicitly opened or
+	// chosen via a save dialog. SaveFile only writes to these, so a malicious
+	// or buggy frontend payload cannot redirect a save to an arbitrary path.
+	allowedWrites map[string]struct{}
+	writeMu       sync.Mutex
 	// startupFile holds the path passed on the command line (e.g. by the .md
 	// file association). The frontend reads it once after mount.
 	startupFile string
@@ -143,8 +155,29 @@ func (a *App) ReadFileAt(path string) (OpenResult, error) {
 	enc := detectEncoding(b)
 	nl := detectNewline(b)
 	a.recordRecent(path)
+	a.allowWrite(path)
 	a.startWatching(path)
 	return OpenResult{Path: path, Content: decodeBytes(b, enc), Encoding: enc, Newline: nl}, nil
+}
+
+// allowWrite records path as a permitted save target (after an explicit
+// open or save-dialog choice). filepath.Clean normalizes case/separator
+// differences between the opened and the later saved path.
+func (a *App) allowWrite(path string) {
+	a.writeMu.Lock()
+	if a.allowedWrites == nil {
+		a.allowedWrites = make(map[string]struct{})
+	}
+	a.allowedWrites[filepath.Clean(path)] = struct{}{}
+	a.writeMu.Unlock()
+}
+
+// canWrite reports whether path is a permitted save target.
+func (a *App) canWrite(path string) bool {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	_, ok := a.allowedWrites[filepath.Clean(path)]
+	return ok
 }
 
 // SaveFile writes content back to path in the file's original encoding and
@@ -154,8 +187,11 @@ func (a *App) SaveFile(path, content, encoding, newline string) error {
 	if path == "" {
 		return errors.New("no path")
 	}
+	if !a.canWrite(path) {
+		return errors.New("path not permitted")
+	}
 	// Own writes are ignored by the file watcher (self-write window).
-	atomic.StoreInt64(&a.lastSelfWriteNs, time.Now().Add(500*time.Millisecond).UnixNano())
+	a.lastSelfWriteNs.Store(time.Now().Add(500 * time.Millisecond).UnixNano())
 	b, err := encodeContent(applyNewline(content, newline), encoding)
 	if err != nil {
 		return err
@@ -164,6 +200,8 @@ func (a *App) SaveFile(path, content, encoding, newline string) error {
 		return err
 	}
 	a.recordRecent(path)
+	a.allowWrite(path)
+	a.startWatching(path)
 	return nil
 }
 
@@ -171,13 +209,20 @@ func (a *App) SaveFile(path, content, encoding, newline string) error {
 // cancelled); the frontend then passes it to SaveFile. This backs 另存为 and
 // the first save of an untitled document.
 func (a *App) PickSavePath(defaultName string) (string, error) {
-	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+	p, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "保存 Markdown",
 		DefaultFilename: defaultName,
 		Filters: []runtime.FileFilter{
 			{DisplayName: "Markdown", Pattern: "*.md;*.markdown;*.txt"},
 		},
 	})
+	if err != nil {
+		return "", err
+	}
+	if p != "" {
+		a.allowWrite(p)
+	}
+	return p, nil
 }
 
 // writeFileAtomic writes b to path via a temp file in the same directory plus
@@ -189,6 +234,13 @@ func writeFileAtomic(path string, b []byte) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	// Flush to stable storage before rename so a power loss after rename
+	// cannot leave a truncated/empty file.
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		return err
@@ -210,19 +262,23 @@ func writeFileAtomic(path string, b []byte) error {
 // the file itself is modified by something other than this app. Watching the
 // directory (not the file) survives editors that replace files on save.
 func (a *App) startWatching(path string) {
-	a.stopWatching()
+	a.watchMu.Lock()
+	a.stopWatchingLocked()
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
+		a.watchMu.Unlock()
 		return
 	}
 	if err := w.Add(filepath.Dir(path)); err != nil {
 		w.Close()
+		a.watchMu.Unlock()
 		return
 	}
 	cleanPath := filepath.Clean(path)
 	done := make(chan struct{})
 	a.watcher = w
 	a.watchDone = done
+	a.watchMu.Unlock()
 	go func() {
 		defer w.Close()
 		for {
@@ -239,7 +295,7 @@ func (a *App) startWatching(path string) {
 				if !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Create) {
 					continue
 				}
-				if time.Now().UnixNano() < atomic.LoadInt64(&a.lastSelfWriteNs) {
+				if time.Now().UnixNano() < a.lastSelfWriteNs.Load() {
 					continue
 				}
 				runtime.EventsEmit(a.ctx, "mdview:file-changed")
@@ -253,6 +309,13 @@ func (a *App) startWatching(path string) {
 }
 
 func (a *App) stopWatching() {
+	a.watchMu.Lock()
+	a.stopWatchingLocked()
+	a.watchMu.Unlock()
+}
+
+// stopWatchingLocked tears down the current watcher. Caller must hold watchMu.
+func (a *App) stopWatchingLocked() {
 	if a.watchDone != nil {
 		close(a.watchDone)
 		a.watchDone = nil
@@ -284,6 +347,12 @@ func (a *App) LoadImageForSrc(src, mdPath, imageRoot string) (ImageData, error) 
 		return ImageData{}, errors.New("empty src")
 	}
 	abs := resolveImagePath(src, mdPath, imageRoot)
+	// Reject unsupported image extensions up front (before touching disk):
+	// mimeByExt returns application/octet-stream for anything it doesn't
+	// recognize, which would otherwise be bridged to the WebView as a data URL.
+	if mimeByExt(filepath.Ext(abs)) == "application/octet-stream" {
+		return ImageData{}, errors.New("unsupported image type")
+	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		return ImageData{}, err
@@ -371,6 +440,14 @@ func detectEncoding(b []byte) string {
 		if dec, err := simplifiedchinese.GB18030.NewDecoder().Bytes(b); err == nil &&
 			!strings.ContainsRune(string(dec), '\uFFFD') && containsCJK(string(dec)) {
 			return "gb18030"
+		}
+	}
+	// Symmetric Big5 fallback: when chardet misses a Big5 file it would
+	// otherwise be decoded as UTF-8 and permanently corrupted on save.
+	if bytes.IndexByte(b, 0) == -1 {
+		if dec, err := traditionalchinese.Big5.NewDecoder().Bytes(b); err == nil &&
+			!strings.ContainsRune(string(dec), '\uFFFD') && containsCJK(string(dec)) {
+			return "big5"
 		}
 	}
 	return "utf-8"

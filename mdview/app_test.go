@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,12 +15,39 @@ import (
 	"golang.org/x/text/encoding/traditionalchinese"
 )
 
-const sampleMd = `C:\UserFile\WorkSpace\ZcodeWork\simplify2md\hybrid_auto\Frequency_Modulation_Nonlinearity_Correction_for_FMCW_SAL_Based_on_WVD_With_Gradient_Rotation_Enhancement.md`
+// makeSampleFile writes a self-contained UTF-8 Markdown fixture (Chinese text,
+// an inline formula and an image reference) plus a real 1x1 PNG under
+// images/, so image-loading and encoding-detection tests run without a
+// developer-specific path.
+func makeSampleFile(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	mdPath := filepath.Join(dir, "note.md")
+	content := "# 测试文档\n\n这是一段中文内容，包含公式 $x^2+y^2=z^2$ 与图片 ![](images/figure-1.jpg)。\n\n"
+	if err := os.WriteFile(mdPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	imgDir := filepath.Join(dir, "images")
+	if err := os.MkdirAll(imgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{255, 0, 0, 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imgDir, "figure-1.jpg"), buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return mdPath
+}
 
 // Relative image src must resolve against the md file's directory.
 func TestResolveImagePathRelative(t *testing.T) {
-	got := resolveImagePath(`images/figure-1.jpg`, sampleMd, "")
-	want := filepath.Join(filepath.Dir(sampleMd), "images", "figure-1.jpg")
+	md := filepath.Join("C:", "docs", "note.md")
+	got := resolveImagePath(`images/figure-1.jpg`, md, "")
+	want := filepath.Join(filepath.Dir(md), "images", "figure-1.jpg")
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -34,34 +64,34 @@ func TestResolveImagePathWithImageRoot(t *testing.T) {
 
 // Absolute src passes through untouched.
 func TestResolveImagePathAbsolute(t *testing.T) {
-	got := resolveImagePath(`D:\pics\pic.png`, sampleMd, "")
+	got := resolveImagePath(`D:\pics\pic.png`, "", "")
 	want := `D:\pics\pic.png`
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
 
-// The real figure from the sample document must load non-empty bytes.
+// The sample fixture's referenced image must load non-empty bytes with the
+// correct mime.
 func TestLoadRealSampleImage(t *testing.T) {
-	abs := resolveImagePath(`images/figure-1.jpg`, sampleMd, "")
-	if _, err := os.Stat(abs); err != nil {
-		t.Skipf("sample image not present: %v", err)
-	}
-	b, err := os.ReadFile(abs)
+	mdPath := makeSampleFile(t)
+	img, err := NewApp().LoadImageForSrc("images/figure-1.jpg", mdPath, "")
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(b) == 0 {
+	if len(img.B64) == 0 {
 		t.Fatal("empty bytes")
 	}
-	t.Logf("figure-1.jpg: %d bytes, mime=%s", len(b), mimeByExt(filepath.Ext(abs)))
+	if img.Mime != "image/jpeg" {
+		t.Fatalf("want image/jpeg, got %s", img.Mime)
+	}
 }
 
-// The real sample document is UTF-8 and must be detected as such.
+// The sample fixture document is UTF-8 and must be detected as such.
 func TestDetectEncodingUTF8(t *testing.T) {
-	b, err := os.ReadFile(sampleMd)
+	b, err := os.ReadFile(makeSampleFile(t))
 	if err != nil {
-		t.Skipf("sample missing: %v", err)
+		t.Fatal(err)
 	}
 	if got := detectEncoding(b); got != "utf-8" {
 		t.Fatalf("want utf-8, got %s", got)
@@ -155,6 +185,7 @@ func TestDetectEncodingBinaryNotGB(t *testing.T) {
 func TestSaveFileAtomic(t *testing.T) {
 	a := NewApp()
 	path := filepath.Join(t.TempDir(), "note.md")
+	a.allowWrite(path)
 	if err := a.SaveFile(path, "# hi\n", "utf-8", "lf"); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +231,7 @@ func TestLoadImageTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := NewApp()
-	if _, err := a.LoadImageForSrc(big, sampleMd, ""); err == nil || !strings.Contains(err.Error(), "larger than") {
+	if _, err := a.LoadImageForSrc(big, "", ""); err == nil || !strings.Contains(err.Error(), "larger than") {
 		t.Fatalf("want size-cap error, got %v", err)
 	}
 }
