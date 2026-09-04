@@ -952,9 +952,15 @@ function resolveImages() {
 
 function onImageIntersect(entries: IntersectionObserverEntry[]) {
   for (const entry of entries) {
+    // ⚠️ unobserve ONLY when we actually hydrate. observe() always delivers an
+    // initial callback with the element's CURRENT state — for a below-viewport
+    // image that's isIntersecting=false. Unobserving there (the original
+    // v0.2.0 bug) removed the element from observation before it was ever
+    // visible, so scrolling it into view later never fired again and the image
+    // stayed on the 1×1 placeholder forever.
+    if (!entry.isIntersecting) continue
     const observed = entry.target as HTMLImageElement
     imageObserver?.unobserve(observed)
-    if (!entry.isIntersecting) continue
     const id = observed.dataset.lazy
     if (!id) continue
     // Re-query the CURRENT dom instead of trusting the observed node: a
