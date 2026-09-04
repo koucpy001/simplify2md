@@ -9,6 +9,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
+// appVersion is injected at build time via -ldflags "-X main.appVersion=...".
+// It stays "dev" for local/non-release builds; CheckForUpdate treats "dev"
+// as "do not check for updates".
+var appVersion = "dev"
+
 //go:embed all:frontend/dist
 var assets embed.FS
 

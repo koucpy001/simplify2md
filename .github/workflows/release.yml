@@ -48,8 +48,9 @@ jobs:
 
       # -s 跳过 wails 自带的 frontend 步骤（上一步已构建）。
       - name: Build portable exe + NSIS installer
+        shell: bash
         working-directory: mdview
-        run: wails build -nsis -s
+        run: wails build -nsis -s -ldflags "-X main.appVersion=$GITHUB_REF_NAME"
 
       - name: Build release notes
         shell: bash

@@ -7,8 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,9 +51,37 @@ type App struct {
 	// startupFile holds the path passed on the command line (e.g. by the .md
 	// file association). The frontend reads it once after mount.
 	startupFile string
+	// updateClient / updateBaseURL let tests point CheckForUpdate at an
+	// httptest.Server; nil/empty fall back to safe production defaults (GitHub
+	// API, hard 5s timeout) so the app never hangs on a flaky network.
+	updateClient *http.Client
+	updateBaseURL string
+	// draftDir overrides the autosave directory (default under UserConfigDir).
+	// Tests set it to t.TempDir() to stay off the real filesystem.
+	draftDir string
+	// configDir overrides the base config directory (default os.UserConfigDir),
+	// so config-touching bindings can be tested off the real filesystem.
+	configDir string
 }
 
-func NewApp() *App { return &App{} }
+const (
+	updateDefaultURL  = "https://api.github.com/repos/koucpy001/simplify2md/releases/latest"
+	updateSafeURLPrefix = "https://github.com/koucpy001/simplify2md/releases"
+	updateTimeout     = 5 * time.Second
+)
+
+// draftKeyRe is the only gate on where a draft may be written: a 40-hex sha1
+// (the frontend hashes the file path) or the literal "untitled". Any other key
+// is rejected, so a malicious/buggy payload cannot escape the autosave dir via
+// path traversal ("../../etc/passwd").
+var draftKeyRe = regexp.MustCompile(`^[0-9a-f]{40}$|^untitled$`)
+
+func NewApp() *App {
+	return &App{
+		updateClient: &http.Client{Timeout: updateTimeout},
+		updateBaseURL: updateDefaultURL,
+	}
+}
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
@@ -521,9 +553,13 @@ type appConfig struct {
 }
 
 func (a *App) configPath() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
+	dir := a.configDir
+	if dir == "" {
+		var err error
+		dir, err = os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
 	}
 	return filepath.Join(dir, "simplify2md", "config.json")
 }
@@ -581,5 +617,234 @@ func (a *App) RemoveRecent(path string) {
 		}
 	}
 	c.RecentFiles = out
+	a.saveConfig(c)
+}
+
+// ---- update check ----
+
+// UpdateInfo describes a possible newer release. HasUpdate is false when the
+// app is up to date, on "dev" builds, or when the version can't be compared.
+// HtmlURL is only ever the whitelisted GitHub releases URL; it is never opened
+// by Go — the frontend calls runtime.BrowserOpenURL on it.
+type UpdateInfo struct {
+	HasUpdate bool   `json:"hasUpdate"`
+	LatestTag string `json:"latestTag"`
+	HtmlURL   string `json:"htmlURL"`
+}
+
+// CheckForUpdate queries the GitHub releases API for a newer tag than the
+// running build. It is intentionally fail-soft: network errors, non-200
+// responses, malformed JSON, and unparseable versions all return without
+// panicking and without crashing the app. A "dev" build (or version it can't
+// parse) yields HasUpdate=false and a nil error, i.e. "no update, nothing to
+// do". The http client / base URL are field-injectable so tests can target an
+// httptest.Server.
+func (a *App) CheckForUpdate() (UpdateInfo, error) {
+	info := UpdateInfo{HasUpdate: false}
+	if appVersion == "dev" {
+		return info, nil
+	}
+	client := a.updateClient
+	if client == nil {
+		client = &http.Client{Timeout: updateTimeout}
+	}
+	url := a.updateBaseURL
+	if url == "" {
+		url = updateDefaultURL
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return info, err
+	}
+	req.Header.Set("User-Agent", "simplify2md")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return info, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return info, fmt.Errorf("update check returned status %d", resp.StatusCode)
+	}
+	var payload struct {
+		TagName string `json:"tag_name"`
+		HtmlURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return info, err
+	}
+	// A version we can't compare is treated as "no update" rather than an
+	// error, so a malformed upstream tag never nags the user.
+	hasUpdate, err := versionGreaterThan(payload.TagName, appVersion)
+	if err != nil {
+		return info, nil
+	}
+	info.HasUpdate = hasUpdate
+	info.LatestTag = payload.TagName
+	// Strictly whitelist the release URL: anything not under our releases
+	// namespace is dropped, preventing an open-redirect / XSS→RCE hand-off.
+	if strings.HasPrefix(payload.HtmlURL, updateSafeURLPrefix) {
+		info.HtmlURL = payload.HtmlURL
+	} else {
+		info.HtmlURL = ""
+	}
+	return info, nil
+}
+
+// versionGreaterThan reports whether latest is semantically greater than
+// current. Both sides have a leading "v" stripped before comparison;
+// missing minor/patch fields are treated as 0. A non-numeric segment on
+// either side is a parse error (caller maps that to "no update").
+func versionGreaterThan(latest, current string) (bool, error) {
+	la, err1 := parseSemver(latest)
+	ca, err2 := parseSemver(current)
+	if err1 != nil || err2 != nil {
+		return false, fmt.Errorf("unparseable version: latest=%q current=%q", latest, current)
+	}
+	for i := 0; i < 3; i++ {
+		if la[i] != ca[i] {
+			return la[i] > ca[i], nil
+		}
+	}
+	return false, nil
+}
+
+func parseSemver(v string) ([3]int, error) {
+	var nums [3]int
+	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
+	for i := 0; i < 3; i++ {
+		if i >= len(parts) {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(parts[i]))
+		if err != nil {
+			return nums, fmt.Errorf("invalid version segment %q", parts[i])
+		}
+		nums[i] = n
+	}
+	return nums, nil
+}
+
+// ---- autosave drafts ----
+
+// DraftInfo is the metadata the frontend lists to populate the draft picker.
+type DraftInfo struct {
+	Key     string `json:"key"`
+	ModTime int64  `json:"modTime"`
+}
+
+// autosaveDir returns the draft store, defaulting to
+// <UserConfigDir>/simplify2md/autosave unless draftDir was injected (tests).
+func (a *App) autosaveDir() string {
+	if a.draftDir != "" {
+		return a.draftDir
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "simplify2md", "autosave")
+}
+
+// SaveDraft writes content to <dir>/<key>.md. key must be a 40-hex sha1 or the
+// literal "untitled"; anything else is rejected to block path traversal. Disk
+// errors are returned for the frontend to handle silently.
+func (a *App) SaveDraft(key, content string) error {
+	if !draftKeyRe.MatchString(key) {
+		return fmt.Errorf("invalid draft key %q", key)
+	}
+	dir := a.autosaveDir()
+	if dir == "" {
+		return errors.New("cannot resolve autosave directory")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+".md"), []byte(content), 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ListDrafts returns all drafts sorted by modification time, newest first.
+// A missing directory yields an empty list rather than an error.
+func (a *App) ListDrafts() ([]DraftInfo, error) {
+	dir := a.autosaveDir()
+	if dir == "" {
+		return nil, errors.New("cannot resolve autosave directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []DraftInfo{}, nil
+		}
+		return nil, err
+	}
+	out := make([]DraftInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		key := strings.TrimSuffix(name, ".md")
+		if !draftKeyRe.MatchString(key) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, DraftInfo{Key: key, ModTime: info.ModTime().Unix()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ModTime > out[j].ModTime
+	})
+	return out, nil
+}
+
+// LoadDraft returns the content of a previously saved draft. Same key
+// whitelist as SaveDraft.
+func (a *App) LoadDraft(key string) (string, error) {
+	if !draftKeyRe.MatchString(key) {
+		return "", fmt.Errorf("invalid draft key %q", key)
+	}
+	dir := a.autosaveDir()
+	if dir == "" {
+		return "", errors.New("cannot resolve autosave directory")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, key+".md"))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// ClearDraft deletes a single draft. Same key whitelist; deleting a
+// non-existent key is a no-op (idempotent) rather than an error.
+func (a *App) ClearDraft(key string) error {
+	if !draftKeyRe.MatchString(key) {
+		return fmt.Errorf("invalid draft key %q", key)
+	}
+	dir := a.autosaveDir()
+	if dir == "" {
+		return errors.New("cannot resolve autosave directory")
+	}
+	err := os.Remove(filepath.Join(dir, key+".md"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// ClearRecents wipes the recent-files list and the last-opened file. We also
+// clear LastFile for hygiene; the frontend's true recovery source is
+// recents[0], so this does not lose anything the UI relies on.
+func (a *App) ClearRecents() {
+	c := a.loadConfig()
+	c.RecentFiles = nil
+	c.LastFile = ""
 	a.saveConfig(c)
 }
