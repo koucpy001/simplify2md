@@ -603,7 +603,8 @@ async function saveAs() {
     filePath.value = p
     markClean()
     abandonDraftFor(p)
-    if (!oldPath) abandonDraftFor('')
+    if (oldPath) abandonDraftFor(oldPath)
+    else abandonDraftFor('')
     status.value = '已保存 ' + new Date().toLocaleTimeString()
     await refreshRecents()
   } catch (e: any) {
@@ -696,7 +697,7 @@ function onPreviewClick(e: MouseEvent) {
   // src so a 1×1 transparent placeholder never opens a blank lightbox.
   const img = target.closest('img')
   if (img) {
-    if (img.dataset.lazy === '1' || !img.getAttribute('src')) return
+    if (img.dataset.lazy || !img.getAttribute('src')) return
     e.preventDefault()
     lightboxSrc.value = img.src
     lightboxVisible.value = true
@@ -1141,6 +1142,7 @@ function gotoOutline(o: OutlineItem) {
 watch(source, () => {
   if (loadingFile) return
   if (!dirty.value) markDirty()
+  else scheduleDraftSave() // refresh snapshot + re-arm idle flush on every edit
   if (renderTimer) clearTimeout(renderTimer)
   renderTimer = setTimeout(render, 200)
 })
