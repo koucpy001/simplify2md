@@ -5,6 +5,7 @@
 // Run with: npx tsx test-pipeline.ts
 import { existsSync, readFileSync } from 'node:fs'
 import { renderMarkdown, extractImageRoot, extractOutline } from './src/lib/markdown'
+import { LruCache } from './src/lib/lru.ts'
 
 let failures = 0
 function check(name: string, ok: boolean, detail = '') {
@@ -117,6 +118,81 @@ check('adversarial: unclosed <table> renders without throwing', tableOk && table
 // DOMPurify must strip event handlers from embedded HTML (CRITICAL-1).
 const xssHtml = renderMarkdown('<img src=x onerror=alert(1)>')
 check('adversarial: DOMPurify strips onerror handler', !/onerror/i.test(xssHtml))
+
+// ---- acceptance evidence: plan todo 8 / 9 / 12 ----
+
+// Timing (todo 8): a ~2MB doc with an unclosed <table> must render well under
+// budget. Threshold is relaxed to 5s on Windows (CI runner slow/volatile, ORACLE-M2).
+// No shell-out / subprocess. Few sizable paragraphs keep node count modest so the Node-side
+// jsdom DOMPurify cost (scales with node count) stays bounded and representative.
+{
+  const para =
+    '这是一段较长的中文段落，用于填充文档体积。'.repeat(20) +
+    ' Some English text to pad paragraph length so each block is sizable. '.repeat(20)
+  const big = (para + '\n\n').repeat(1100) // ~2MB source, ~1100 nodes (jsdom DOMPurify cost scales with node count)
+  const doc = big + '\nbefore\n<table>\nafter'
+  const start = Date.now()
+  let ok = true
+  let out = ''
+  try {
+    out = renderMarkdown(doc)
+  } catch {
+    ok = false
+  }
+  const elapsed = Date.now() - start
+  const limit = process.platform === 'win32' ? 5000 : 1000
+  console.log(`timing: ${elapsed}ms (limit ${limit}ms) on ${process.platform}`)
+  check(
+    'timing: ~2MB doc + unclosed <table> renders under budget',
+    ok && out.length > 0 && elapsed < limit,
+    `${elapsed}ms`,
+  )
+}
+
+// LRU cache (todo 9): dual budget — item count AND total base64 bytes.
+{
+  // (a) capacity eviction: >64 items -> oldest evicted, newest retained.
+  const c = new LruCache()
+  for (let i = 0; i < 70; i++) c.set('k' + i, 'v' + i)
+  check('lru: capacity eviction keeps <=64 items', c.size === 64, `size=${c.size}`)
+  check('lru: capacity eviction keeps newest', c.has('k69'))
+  check('lru: capacity eviction drops oldest', !c.has('k0'))
+
+  // (b) byte-budget eviction: total base64 exceeds budget -> oldest evicted.
+  // Use a small 1MB budget so the test stays fast/non-flaky; the production
+  // default is 256MB (asserted via source below).
+  const b = new LruCache(200, 1024 * 1024)
+  const chunk = 'x'.repeat(300 * 1024) // ~300KB payload
+  for (let i = 0; i < 4; i++) b.set('b' + i, chunk)
+  check(
+    'lru: byte-budget eviction drops oldest over budget',
+    b.size < 4 && !b.has('b0') && b.has('b3'),
+    `size=${b.size}`,
+  )
+  const lruSrc = readFileSync('src/lib/lru.ts', 'utf8')
+  check('lru: production byte budget is 256MB', lruSrc.includes('256 * 1024 * 1024'))
+
+  // (c) failed '' entry: present but falsy-looking; re-set does not grow size.
+  const f = new LruCache()
+  f.set('fail', '')
+  check("lru: failed '' entry get returns ''", f.get('fail') === '')
+  check('lru: failed entry counted in size', f.size === 1, `size=${f.size}`)
+  check('lru: failed entry has() true', f.has('fail') === true)
+  f.set('fail', '') // re-set same key — must not re-read or grow
+  check('lru: re-set same key does not grow size', f.size === 1, `size=${f.size}`)
+  check("lru: re-set still returns ''", f.get('fail') === '')
+}
+
+// Mermaid marker (todo 12): a mermaid fence keeps the `language-mermaid` class,
+// and markdown.ts must NOT import mermaid itself — only App.vue dynamically
+// imports it on demand. Source check via readFileSync, no shell-out (ORACLE-M2).
+{
+  const mmd = 'before\n\n```mermaid\ngraph TD; A-->B\n```\n\nafter'
+  const mmdHtml = renderMarkdown(mmd)
+  check('mermaid: fence keeps language-mermaid class', /language-mermaid/.test(mmdHtml))
+  const mdSrc = readFileSync('src/lib/markdown.ts', 'utf8')
+  check("mermaid: markdown.ts does NOT import('mermaid')", !mdSrc.includes("import('mermaid')"))
+}
 
 if (failures) {
   console.error(`\n${failures} check(s) FAILED`)
