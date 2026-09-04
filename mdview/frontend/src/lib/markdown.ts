@@ -310,8 +310,17 @@ const HTML_BLOCK_PASSTHROUGH_TAGS = [
   'article',
   'aside',
 ];
+// NOTE — documented semantic boundary (METIS#13): `HTML_BLOCK_RE` below binds the
+// inner span to `[\s\S]{0,100000}` (100k chars) instead of an unbounded lazy
+// `[\s\S]*?`. Consequence: a *properly closed* block-level HTML element that is
+// larger than 100k characters will no longer be unwrapped by this preprocessor —
+// it stays escaped/inline rather than promoted to a column-0 HTML block. This is
+// an intentional, accepted trade-off: the catastrophic backtracking risk of the
+// unbounded pattern (esp. on unclosed tags in large docs) outweighs losing the
+// rare >100k fully-closed HTML block. See `unwrapHtmlSegment` for the cheap
+// pre-check that also drops unclosed tags from the candidate set entirely.
 const HTML_BLOCK_RE = new RegExp(
-  `^([ \\t]*)(<(?:${HTML_BLOCK_PASSTHROUGH_TAGS.join('|')})\\b[\\s\\S]*?</(?:${HTML_BLOCK_PASSTHROUGH_TAGS.join('|')})>)[ \\t]*$`,
+  `^([ \\t]*)(<(?:${HTML_BLOCK_PASSTHROUGH_TAGS.join('|')})\\b[\\s\\S]{0,100000}</(?:${HTML_BLOCK_PASSTHROUGH_TAGS.join('|')})>)[ \\t]*$`,
   'gmi',
 );
 
@@ -342,11 +351,31 @@ function unwrapInlineHtmlBlocks(source: string): string {
   return segments
     .map((seg) => {
       if (seg.isFence) return seg.text;
-      return seg.text.replace(HTML_BLOCK_RE, (_match, _indent, html) => {
-        return `\n\n${html}\n\n`;
-      });
+      return unwrapHtmlSegment(seg.text);
     })
     .join('');
+}
+
+// METIS#13 cheap pre-check (string-only, no regex): an unclosed passthrough tag
+// makes the matcher scan for a `</tag>` that never arrives — the
+// catastrophic-backtracking case. Restrict the candidate tag set to tags that
+// BOTH appear and have a matching close in this segment. Unclosed tags are
+// dropped from the pattern so the regex never backtracks over an unterminated
+// block; properly-closed blocks are still unwrapped exactly as before. The
+// `{0,100000}` bound in `HTML_BLOCK_RE` caps any residual span.
+function unwrapHtmlSegment(text: string): string {
+  const openTags = HTML_BLOCK_PASSTHROUGH_TAGS.filter((t) => text.includes('<' + t));
+  if (openTags.length === 0) return text;
+  const closedTags = openTags.filter((t) => text.includes('</' + t));
+  if (closedTags.length === 0) return text;
+  const re =
+    openTags.length === HTML_BLOCK_PASSTHROUGH_TAGS.length
+      ? HTML_BLOCK_RE
+      : new RegExp(
+          `^([ \\t]*)(<(?:${closedTags.join('|')})\\b[\\s\\S]{0,100000}</(?:${closedTags.join('|')})>)[ \\t]*$`,
+          'gmi',
+        );
+  return text.replace(re, (_match, _indent, html) => `\n\n${html}\n\n`);
 }
 
 // ---- Malformed table-delimiter normalization ------------------------------
