@@ -37,11 +37,14 @@ import io.github.koucpy001.simplify2md.storage.AndroidBackupFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidConfigFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentContentReader
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentMetadataReader
+import io.github.koucpy001.simplify2md.storage.AndroidDraftFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidRecoveryPrompt
 import io.github.koucpy001.simplify2md.storage.AndroidSafLauncher
 import io.github.koucpy001.simplify2md.storage.AndroidSaveDocumentIo
 import io.github.koucpy001.simplify2md.storage.AndroidUriGrantReleaser
 import io.github.koucpy001.simplify2md.storage.AndroidUriPermissionStore
+import io.github.koucpy001.simplify2md.storage.DraftBindings
+import io.github.koucpy001.simplify2md.storage.DraftStore
 import io.github.koucpy001.simplify2md.storage.ReconcileCoordinator
 import io.github.koucpy001.simplify2md.storage.ReconcileEngine
 import io.github.koucpy001.simplify2md.storage.ReconcileNotice
@@ -301,6 +304,10 @@ class MainActivity : Activity() {
 
         // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
         SaveBindings(SaveStore(backupFs, saveIo, saveIo)).registerOn(bridge)
+
+        // Autosave drafts (todo 14): app-private filesDir/autosave/, keys are
+        // sha1(uri) or the literal "untitled" (DraftKey.of, matching App.vue).
+        DraftBindings(DraftStore(AndroidDraftFileSystem(filesDir))).registerOn(bridge)
 
         root.addView(
             webView,

@@ -129,6 +129,35 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew \
 因此界面不会出现 percent-encoded URI 原文。草稿恢复的草稿↔文档绑定由 `src/lib/draft-binding.ts` 的纯函数判定：
 命名草稿仅当 `sha1(uri)` 与当前文档一致才绑定，否则按未命名草稿恢复并清空 `filePath`（防止把草稿覆盖写回启动恢复的文件）。
 
+## 草稿存储与草稿键身份（todo 14）
+
+草稿由 `storage/DraftStore.kt`（纯 JVM，可测）按 `mdview/app.go:736-840` 逐条移植，
+文件系统边界抽象为 `DraftFileSystem`，Android 实现见 `storage/AndroidDrafts.kt`。
+
+- **位置**：`filesDir/autosave/<key>.md`（app-private，目录按需 `mkdirs`）。**绝不**写入 `cacheDir`
+  （系统可回收）、SAF 树、同步目录或 config 目录；不使用 `os.UserConfigDir` 语义。
+- **键身份**：`DraftKey.of(uri)` = `sha1(uriString)` 的 **40 位小写十六进制**；无文档 URI 时为字面量
+  `untitled`。派生方式与前端 `App.vue:451-461`（`crypto.subtle` SHA-1 over UTF-8）**完全一致**，
+  因此跨会话稳定；显示名或任何用户文本**绝不**进入键，键是唯一到达文件系统的字符串。
+- **键校验**：正则 `^[0-9a-f]{40}$|^untitled$`（`DraftStore.KEY_PATTERN`，对应 `mdview/app.go:77`）。
+  大写十六进制、39/41 位、空串、含 `/`、`\`、`..` 等一律在任何 IO 之前拒绝（JS Promise reject，
+  磁盘无任何写入），因此路径穿越不可达。
+
+| 绑定 | 语义 | 对应 Go |
+|---|---|---|
+| `SaveDraft(key, content)` | 写 `<key>.md`（首次保存时建目录） | `SaveDraft`（`:752-767`） |
+| `LoadDraft(key)` | 读内容；缺失/非法键 reject | `LoadDraft`（`:810-823`） |
+| `ListDrafts()` | 返回 `[{key, modTime}]`，modTime 为 **epoch 秒**（同 Go `Unix()`），按 modTime **倒序**；跳过目录、非 `.md` 与非法键项；目录缺失视为空列表 | `ListDrafts`（`:771-806`） |
+| `ClearDraft(key)` | 删除 `<key>.md`；键不存在为 no-op（幂等） | `ClearDraft`（`:827-840`） |
+
+modTime 相等时以 **key 升序**作为确定性 tiebreak（Go 的 `sort.Slice` 此时顺序未定义，测试会因此
+flaky）；这不改变"倒序"契约。四个绑定均经 `Bridge.registerHandler` 注册，名字早已在
+`BridgeMethods.WHITELIST` 中，**不新增桥函数、不新增事件**。
+
+**放弃后不复活**：`ClearDraft` 真正删除文件；前端 `abandonDraftFor`（`App.vue:518-535`）另外用
+`draftAbandonToken` 取消该键的定时器与在途写入，使迟到的 `SaveDraft` 无法重建草稿。JVM 单测断言
+`clear` 后 `load` reject 且不再出现在 `ListDrafts` 中。
+
 ## 保存的可靠性（todo 11）
 
 Android 的 SAF 文档 URI **无法**做"临时文件 + rename 覆盖"，因此桌面 `README.md:18` 的文件级
