@@ -21,6 +21,7 @@ import {
   ClearDraft,
   ClearRecents,
   EventsOn,
+  notifyBridgeReady,
   BrowserOpenURL,
   type ImageDataLike,
   type OpenResultLike,
@@ -34,6 +35,11 @@ import { imageStatusHint } from './lib/image-token'
 import { saveAction } from './lib/save-policy'
 import { baseName, dirOf, selectDisplayName } from './lib/paths'
 import { decideDraftTarget, draftFilePath } from './lib/draft-binding'
+import {
+  registerBridgeEvents,
+  createStartupReadyGate,
+  IME_HEIGHT_CSS_VAR,
+} from './lib/bridge-events'
 
 const source = ref('')
 const filePath = ref('')
@@ -82,9 +88,15 @@ const checkingUpdate = ref(false)
 // the end of the recents branch. Auto-path failures are silent; the manual
 // toolbar button surfaces them in the status bar.
 async function postStartup() {
+  // Startup-ready gate (todo 17): ready must NOT fire while the draft-recovery
+  // modal is pending, so hold across recoverLatestDraft and only release when
+  // no modal appeared (the modal's confirm/reject handlers release otherwise).
+  startupHoldOpen = true
+  startupReadyGate.hold()
   // Startup draft recovery (todo 10): only AFTER the startup load has settled
   // (resolve or reject) so we never prompt over a still-loading document.
   await recoverLatestDraft()
+  if (!draftRecoverVisible.value) releaseStartupHold()
   // Fire-and-forget update check; never blocks or fails the startup chain.
   try {
     const info = await CheckForUpdate()
@@ -192,12 +204,14 @@ async function confirmRecoverDraft() {
   setTimeout(() => { loadingFile = false }, 0)
   draftRecoverInfo.value = null
   status.value = '已恢复未保存的草稿'
+  releaseStartupHold()
 }
 
 function rejectRecoverDraft() {
   // Keep the draft on disk — the user may recover later (todo 10d).
   draftRecoverVisible.value = false
   draftRecoverInfo.value = null
+  releaseStartupHold()
 }
 
 // Autosave drafts (todo 10): ≤30s throttle while dirty + ≥30s idle final flush.
@@ -222,6 +236,17 @@ const lightboxSrc = ref('')
 // Draft recovery prompt (todo 10) — reuses the switchConfirm modal styling.
 const draftRecoverVisible = ref(false)
 const draftRecoverInfo = ref<{ key: string; content: string; name?: string } | null>(null)
+
+// Startup-ready gate (todo 17): notifyBridgeReady fires at most once, only after
+// the draft-recovery modal (if any) has settled. Desktop's notifyBridgeReady is
+// a no-op, so this changes nothing on Windows.
+const startupReadyGate = createStartupReadyGate(() => notifyBridgeReady())
+let startupHoldOpen = false
+function releaseStartupHold() {
+  if (!startupHoldOpen) return
+  startupHoldOpen = false
+  startupReadyGate.release()
+}
 
 // View mode / outline / theme, persisted per-app via localStorage.
 type ViewMode = 'split' | 'edit' | 'preview'
@@ -1346,19 +1371,47 @@ onMounted(async () => {
     })
     editorView.scrollDOM.addEventListener('scroll', onEditorScroll)
   }
-  EventsOn('mdview:confirm-exit', () => { exitConfirmVisible.value = true })
-  // A second launch of the exe (another double-clicked file) is routed here
-  // by the single-instance lock in main.go.
-  EventsOn('mdview:open-path', (p: string) => { if (p) requestSwitch(() => { void loadPath(p) }) })
-  EventsOn('mdview:file-changed', () => {
-    if (loadingFile || !filePath.value) return
-    if (!dirty.value) {
-      // Not modified locally — follow the disk silently.
-      loadPath(filePath.value)
-      status.value = '文件已在磁盘上更新，已重新加载'
-    } else {
-      fileChangedVisible.value = true
-    }
+  // All five bridge event handlers are registered in the testable module
+  // (todo 17). The mdview:ime handler lives there — do NOT also register it
+  // here (double registration would run the IME side effects twice).
+  registerBridgeEvents(EventsOn, {
+    confirmExit: () => { exitConfirmVisible.value = true },
+    openPath: (p) => { if (p) requestSwitch(() => { void loadPath(p) }) },
+    fileChanged: () => {
+      if (loadingFile || !filePath.value) return
+      if (!dirty.value) {
+        // Not modified locally — follow the disk silently.
+        loadPath(filePath.value)
+        status.value = '文件已在磁盘上更新，已重新加载'
+      } else {
+        fileChangedVisible.value = true
+      }
+    },
+    imeHeight: (cssValue) => {
+      // Native inset consumption already pads the WebView container; this CSS
+      // variable + scrollIntoView is the editor-side fallback so the caret line
+      // stays visible above the keyboard. Never during IME composition — that
+      // would fight cm-editor.ts's composing-period skip logic.
+      document.documentElement.style.setProperty(IME_HEIGHT_CSS_VAR, cssValue)
+      if (editorView && !editorView.composing && cssValue !== '0px') {
+        editorView.contentDOM.scrollIntoView({ block: 'nearest' })
+      }
+    },
+    openText: (payload) => {
+      // Shared plain text -> unnamed document (todo 17 registers the handler;
+      // todo 18 adds the requestSwitch dirty-guard and the Kotlin routing).
+      loadingFile = true
+      filePath.value = payload.filePath
+      currentName.value = ''
+      readonly.value = false
+      if (editorView) replaceEditorDoc(editorView, payload.content)
+      if (source.value !== payload.content) source.value = payload.content
+      markDirty()
+      imageRoot.value = extractImageRoot(payload.content)
+      imageCache.clear()
+      render()
+      setTimeout(() => { loadingFile = false }, 0)
+    },
   })
   updateTitle()
   await refreshRecents()

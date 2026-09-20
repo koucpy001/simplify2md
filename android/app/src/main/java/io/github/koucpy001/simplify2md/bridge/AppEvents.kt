@@ -39,6 +39,16 @@ class AppEvents(private val emitter: (name: String, payloadJson: String) -> Unit
         emit(BridgeEvents.FILE_CHANGED, BridgeEvents.NULL_PAYLOAD)
     }
 
+    /**
+     * `mdview:ime` (todo 17): the keyboard height in physical pixels, from the
+     * root layout's `OnApplyWindowInsetsListener` (`ime()` bottom). The payload
+     * is a hand-built `{"height":<int>}` object — an int needs no JSON library,
+     * and the frontend's `imeInsetPx` sanitizes every shape anyway.
+     */
+    fun ime(heightPx: Int) {
+        emit(BridgeEvents.IME, "{\"height\":$heightPx}")
+    }
+
     private fun emit(name: String, payloadJson: String) {
         require(BridgeEvents.isRegistered(name)) { "not a registered event name: $name" }
         emitter(name, payloadJson)

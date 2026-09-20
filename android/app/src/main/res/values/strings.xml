@@ -17,4 +17,8 @@
     <string name="save_orphan_backup">发现无对应记录的备份，已保留</string>
     <string name="save_fingerprint_unavailable">无法读取文件完成对账，备份已保留</string>
     <string name="save_recovery_failed">恢复操作失败，备份已保留</string>
+
+    <!-- WebView minimum-version gate (todo 17f): the embedded engine is too old
+         for the IME/inset behaviour; input problems are possible. -->
+    <string name="ime_webview_outdated">系统 WebView 版本过低，输入法行为可能异常，建议更新系统 WebView</string>
 </resources>

@@ -102,6 +102,7 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.webkit)
+    implementation(libs.androidx.core)
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)

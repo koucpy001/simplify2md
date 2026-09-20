@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
@@ -12,6 +13,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewAssetLoader
 import io.github.koucpy001.simplify2md.binding.DesktopOnlyBindings
 import io.github.koucpy001.simplify2md.binding.DirtyFlag
@@ -21,6 +26,7 @@ import io.github.koucpy001.simplify2md.binding.ExternalUrlLauncher
 import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
+import io.github.koucpy001.simplify2md.ime.WebViewMinVersion
 import io.github.koucpy001.simplify2md.image.AndroidChildDocumentUriBuilder
 import io.github.koucpy001.simplify2md.image.AndroidImageDocumentReader
 import io.github.koucpy001.simplify2md.image.AndroidTreeGrantPersistence
@@ -164,6 +170,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Edge-to-edge, todo 17 mechanism (a): the window does NOT fit system
+        // windows; the insets are consumed manually below. This is the ONLY
+        // mechanism — the manifest pins windowSoftInputMode=adjustNothing and
+        // the viewport meta carries no interactive-widget, so there is no
+        // viewport resize that could cancel or double-deduct these insets.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
 
         // Cold-start file intents (ACTION_VIEW / ACTION_EDIT) travel ONLY through
         // GetStartupFile (consume-once) and never through the event queue — see
@@ -330,7 +343,56 @@ class MainActivity : Activity() {
             ),
         )
 
+        installImeInsets(root)
+        checkWebViewVersion()
+
         webView.loadUrl(START_URL)
+    }
+
+    /**
+     * Edge-to-edge inset consumption, todo 17 mechanism (b) — the ONLY inset
+     * mechanism in the app (no viewport resize, no fixed bar-height constants).
+     *
+     * The listener consumes BOTH `systemBars()` top+bottom and `ime()` bottom:
+     * the top becomes the WebView container's paddingTop (the toolbar is the
+     * first page element, so without it the status bar / notch would cover the
+     * toolbar in edge-to-edge), and the bottom is `max(systemBars.bottom,
+     * ime.bottom)` as the container's paddingBottom. The keyboard height is
+     * reported to the frontend via `mdview:ime` so the editor can keep the
+     * caret line visible as a scrollIntoView fallback.
+     *
+     * `ime()` insets only exist on API 30+; below that the keyboard overlays
+     * under `adjustNothing` and the reported height is 0 (documented limit).
+     */
+    private fun installImeInsets(root: FrameLayout) {
+        var lastImeBottom = -1
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val imeBottom =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                } else {
+                    0
+                }
+            root.setPadding(0, bars.top, 0, maxOf(bars.bottom, imeBottom))
+            if (imeBottom != lastImeBottom) {
+                lastImeBottom = imeBottom
+                appEvents.ime(imeBottom)
+            }
+            WindowInsetsCompat.CONSUMED
+        }
+    }
+
+    /**
+     * Todo 17(f): an outdated embedded WebView cannot be relied on for the IME
+     * behaviour above; surface a hint instead of failing silently. A null
+     * package (some OEMs/emulators) counts as undeterminable -> hint.
+     */
+    private fun checkWebViewVersion() {
+        val current = WebViewCompat.getCurrentWebViewPackage(this)
+        if (!WebViewMinVersion.isSupported(current?.versionName)) {
+            Toast.makeText(this, R.string.ime_webview_outdated, Toast.LENGTH_LONG).show()
+        }
     }
 
     /** Surfaces a pre-WebView reconciliation notice as a native status toast. */

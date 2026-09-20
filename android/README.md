@@ -83,13 +83,32 @@ android/
 
 | Kotlin 常量 | 发射方法 | payload | `App.vue` 监听点 | 触发归属 |
 |---|---|---|---|---|
-| `BridgeEvents.CONFIRM_EXIT` = `mdview:confirm-exit` | `AppEvents.confirmExit()` | `null` | `App.vue:1242` | 返回键 → **todo 18** |
-| `BridgeEvents.OPEN_PATH` = `mdview:open-path` | `AppEvents.openPath(uri)` | JSON 字符串（文档 URI） | `App.vue:1245` | `onNewIntent` / `ACTION_SEND` → **todo 18** |
-| `BridgeEvents.FILE_CHANGED` = `mdview:file-changed` | `AppEvents.fileChanged()` | `null` | `App.vue:1246` | 前台刷新 → **todo 19** |
+| `BridgeEvents.CONFIRM_EXIT` = `mdview:confirm-exit` | `AppEvents.confirmExit()` | `null` | `bridge-events.ts` | 返回键 → **todo 18** |
+| `BridgeEvents.OPEN_PATH` = `mdview:open-path` | `AppEvents.openPath(uri)` | JSON 字符串（文档 URI） | `bridge-events.ts` | `onNewIntent` / `ACTION_SEND` → **todo 18** |
+| `BridgeEvents.FILE_CHANGED` = `mdview:file-changed` | `AppEvents.fileChanged()` | `null` | `bridge-events.ts` | 前台刷新 → **todo 19** |
+| `BridgeEvents.IME` = `mdview:ime` | `AppEvents.ime(heightPx)` | `{"height":<int>}`（物理像素） | `bridge-events.ts` | 根布局 inset 监听（**todo 17**，已实现） |
 
-`mdview:open-text`（分享纯文本 → 未命名文档）由 todo 18 实现，**不**属于本表；`BridgeEvents.REGISTERED`
-刻意只含上表三个名字。payload 一律经 `BridgeCodec.quote` 做 JSON 编码，不做字符串拼接，
-因此 URI 中的引号 / 换行 / `U+2028` / `U+2029` 无法越出 `evaluateJavascript` 的字符串边界。
+前端的事件注册统一在 `mdview/frontend/src/lib/bridge-events.ts`（`registerBridgeEvents`，五个处理器
+一次性注册；`mdview:ime` 只在此处注册，`App.vue` 不得重复注册），并导出 `createStartupReadyGate()`
+就绪门：草稿恢复弹窗未决时不发 `notifyBridgeReady`，两个 onMounted 出口各至多一次 ready。
+`mdview:open-text`（分享纯文本 → 未命名文档）的处理器同样在 `bridge-events.ts` 注册（todo 17），
+其 `requestSwitch` 守卫语义与 Kotlin 路由由 todo 18 补齐；`BridgeEvents.REGISTERED` 刻意不含它。
+
+## IME 与边到边（todo 17，单一机制）
+
+target 36 下 `adjustResize` 已失效，本工程**只用一种机制**，三者缺一不可且互斥：
+
+1. `WindowCompat.setDecorFitsSystemWindows(window, false)`（`MainActivity.onCreate`）；
+2. 根布局 `ViewCompat.setOnApplyWindowInsetsListener` 同时消费 `systemBars()` 的 top+bottom 与
+   `ime()` 的 bottom：top 作为 WebView 容器 paddingTop（工具栏是页面首个元素，否则被状态栏/刘海
+   遮挡），bottom 取 `max(systemBars.bottom, ime.bottom)` 作为容器 paddingBottom；inset 整体
+   `CONSUMED`；键盘高度经 `mdview:ime` 报告（API <30 无 `ime()` inset，报告 0，键盘直接遮挡属已知限制）；
+3. Manifest `windowSoftInputMode="adjustNothing"`；viewport meta **不含** `interactive-widget`。
+
+前端把高度写入 `--mdview-ime-height` CSS 变量（`imeInsetPx` 纯函数：0/负/NaN/缺失 → `0px`，
+超大值钳制到 10000px），并在非 composing 期触发 `scrollIntoView` 兜底；`cm-editor.ts` 的
+composing 期跳过逻辑未改动。另有 WebView 最低版本门（`WebViewCompat.getCurrentWebViewPackage`，
+`ime/WebViewMinVersion.kt`，阈值 major ≥ 90）：低于阈值或无法判定时以 Toast 提示输入可能异常。
 
 ## 构建与测试
 
