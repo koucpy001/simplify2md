@@ -239,6 +239,19 @@ lazySrc 匹配到新文档节点（串图 / 缓存污染）。
 `image-not-in-tree` / `image-unsupported-provider` / `image-too-large` / `image-denied` /
 `image-tree-cancelled`。映射只做**信息性**提示，不含"重试"动作——恢复由 (c) 的挂起/恢复流程驱动。
 
+## 更新检查（todo 15）
+
+移植 `mdview/app.go:629-726`。纯逻辑在 `update/`（JVM 可测），网络边界抽象为 `UpdateHttpClient`，测试注入假实现、**不触网**：
+
+- 端点 `https://api.github.com/repos/koucpy001/simplify2md/releases/latest`，请求头 `User-Agent: simplify2md` 与 `Accept: application/vnd.github+json`（`update/UpdateChecker.kt`）；
+- semver 比较逐条对齐 Go：去掉单个前导 `v`、缺 minor/patch 视为 0、第四段起忽略（`1.2.3.4` == `1.2.3`）、非数字段 / 空段 / 溢出段一律解析失败；
+- **畸形 tag / 非法版本一律视为"无更新"而非错误**（`UpdateInfo.NONE`），不会打扰用户；非 200 或 JSON 非法则抛 `UpdateCheckException`（自动检查静默、手动检查可见）；
+- `html_url` 仅当以 `https://github.com/koucpy001/simplify2md/releases` 开头才保留，否则置空——任意（甚至恶意）URL 都不可能到达打开器；前端 `BrowserOpenURL` 再经 `ExternalLinks` 白名单二次兜底；
+- 运行版本取 `BuildConfig.VERSION_NAME`；为 `"dev"` 时**短路且零网络调用**；
+- 网络用 `HttpURLConnection`（无第三方 HTTP 依赖），**显式 5s connect / 5s read timeout**（禁止无限等待）；调用只在 `Dispatchers.IO` 上执行，无轮询、无主线程网络；
+- 前端保持"提示 → `BrowserOpenURL` 打开下载页"（`App.vue:73-119`），不申请安装权限、不静默安装、不解析 APK 元数据；
+- 本地 `versionName` 目前是占位 `0.0.0`（todo 21 由 tag 注入）；调试构建会因此把任何 release 视为"有更新"，属预期。
+
 ## 限制与设备项
 
 - `[device]`：连续两次从文件管理器打开不同 `.md`，必须路由到**同一实例**
@@ -251,6 +264,7 @@ lazySrc 匹配到新文档节点（串图 / 缓存污染）。
   该条目被自动移除且不崩溃。JVM 单测只覆盖模型/释放/命名，端到端 UI 需真机（**DEVICE-DEFERRED**）。
 - `[device]`（todo 13）：本地存储含 `images/` 子目录的文档经 (b) 正常显示；从 `Download/` 打开给出提示而非白图；
   云盘来源文档给出"不支持"占位而非空白。无模拟器无法执行（**DEVICE-DEFERRED**）。
+- `[device]`（todo 15）：真机上启动自动检查 / 手动"检查更新"能弹出新版本提示，点击后经系统浏览器打开下载页。本 todo 无独立 `[device]` 判据，最近的真机项是 todo 8 的"链接打开系统浏览器"；无模拟器无法执行（**DEVICE-DEFERRED**）。
 - 桌面 `README.md:18` 的文件级承诺仅适用于 Windows；Android 的保存语义见上方"保存的可靠性"。
 
 ## 编码语义（todo 9，与桌面的两处差异）

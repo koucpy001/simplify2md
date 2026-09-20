@@ -54,6 +54,9 @@ import io.github.koucpy001.simplify2md.storage.SafBindings
 import io.github.koucpy001.simplify2md.storage.SafStore
 import io.github.koucpy001.simplify2md.storage.SaveBindings
 import io.github.koucpy001.simplify2md.storage.SaveStore
+import io.github.koucpy001.simplify2md.update.HttpUrlConnectionUpdateClient
+import io.github.koucpy001.simplify2md.update.UpdateBindings
+import io.github.koucpy001.simplify2md.update.UpdateChecker
 import io.github.koucpy001.simplify2md.web.AssetPathMapper
 import io.github.koucpy001.simplify2md.web.AssetWebViewPathHandler
 import io.github.koucpy001.simplify2md.web.MediaWebViewPathHandler
@@ -308,6 +311,16 @@ class MainActivity : Activity() {
         // Autosave drafts (todo 14): app-private filesDir/autosave/, keys are
         // sha1(uri) or the literal "untitled" (DraftKey.of, matching App.vue).
         DraftBindings(DraftStore(AndroidDraftFileSystem(filesDir))).registerOn(bridge)
+
+        // Update check (todo 15): GitHub Releases over HttpURLConnection with
+        // explicit connect/read timeouts. The running version comes from
+        // BuildConfig.VERSION_NAME; a "dev" build short-circuits with no call.
+        UpdateBindings(
+            UpdateChecker(
+                http = HttpUrlConnectionUpdateClient(),
+                currentVersion = { BuildConfig.VERSION_NAME },
+            ),
+        ).registerOn(bridge)
 
         root.addView(
             webView,
