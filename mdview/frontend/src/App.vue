@@ -29,6 +29,7 @@ import {
 import { EditorView } from '@codemirror/view'
 import { createMarkdownEditor, setEditorHighlight, replaceEditorDoc } from './lib/cm-editor'
 import { LruCache } from './lib/lru'
+import { remedyForToken, saveAsUtf8 } from './lib/encoding-token'
 
 const source = ref('')
 const filePath = ref('')
@@ -52,6 +53,7 @@ let loadingFile = false
 const exitConfirmVisible = ref(false)
 const fileChangedVisible = ref(false)
 const switchConfirmVisible = ref(false)
+const saveAsUtf8ConfirmVisible = ref(false)
 const pendingSwitchAction = ref<(() => void) | null>(null)
 const stats = ref({ words: 0, chars: 0 })
 
@@ -591,7 +593,7 @@ async function save() {
     abandonDraftFor(filePath.value)
     status.value = '已保存 ' + new Date().toLocaleTimeString()
   } catch (e: any) {
-    status.value = String(e)
+    await handleUnmappableSave(e)
   }
 }
 
@@ -602,17 +604,62 @@ async function saveAs() {
     const p = await PickSavePath(filePath.value ? baseName(filePath.value) : '未标题.md')
     if (!p) return
     await SaveFile(p, source.value, fileEnc.value, fileNewline.value)
-    // The untitled draft (if any) is now superseded by the real file.
-    const oldPath = filePath.value
-    filePath.value = p
-    markClean()
-    abandonDraftFor(p)
-    if (oldPath) abandonDraftFor(oldPath)
-    else abandonDraftFor('')
-    status.value = '已保存 ' + new Date().toLocaleTimeString()
-    await refreshRecents()
+    finalizeSaveAs(p)
   } catch (e: any) {
-    status.value = String(e)
+    await handleUnmappableSave(e)
+  }
+}
+
+// Post-save bookkeeping shared by saveAs and the "另存为 UTF-8" remedy.
+function finalizeSaveAs(p: string) {
+  // The untitled draft (if any) is now superseded by the real file.
+  const oldPath = filePath.value
+  filePath.value = p
+  markClean()
+  abandonDraftFor(p)
+  if (oldPath) abandonDraftFor(oldPath)
+  else abandonDraftFor('')
+  status.value = '已保存 ' + new Date().toLocaleTimeString()
+  void refreshRecents()
+}
+
+// A SaveFile rejection carrying `encoding-unmappable` means the document is
+// byte-fidelity and the new non-Latin-1 input cannot be written under its
+// original encoding. The reject path must NOT clear dirty or drop the draft;
+// only a confirmed "另存为 UTF-8" proceeds, and only then does fileEnc flip.
+async function handleUnmappableSave(e: unknown) {
+  const message = e instanceof Error ? e.message : String(e)
+  if (remedyForToken(message) !== 'save-as-utf8') {
+    status.value = message
+    return
+  }
+  saveAsUtf8ConfirmVisible.value = true
+}
+
+function confirmSaveAsUtf8() {
+  saveAsUtf8ConfirmVisible.value = false
+  void runSaveAsUtf8Remedy()
+}
+
+async function runSaveAsUtf8Remedy() {
+  const prevEnc = fileEnc.value
+  const result = await saveAsUtf8(
+    {
+      setFileEnc: (enc) => { fileEnc.value = enc },
+      pickSavePath: (name) => PickSavePath(name),
+      saveFile: (p, c, enc, nl) => SaveFile(p, c, enc, nl),
+    },
+    filePath.value ? baseName(filePath.value) : '未标题.md',
+    source.value,
+    fileNewline.value,
+  )
+  if (result.saved && result.path) {
+    finalizeSaveAs(result.path)
+  } else {
+    // Picker cancelled: the document is still byte-fidelity, so restore the
+    // original label or a later plain save would write the latin1-mapped
+    // string as UTF-8 and corrupt the file.
+    fileEnc.value = prevEnc
   }
 }
 
@@ -1404,6 +1451,16 @@ onBeforeUnmount(() => {
         <div class="modal-actions">
           <button @click="confirmSwitch">继续打开</button>
           <button @click="cancelSwitch">取消</button>
+        </div>
+      </div>
+    </div>
+    <div v-if="saveAsUtf8ConfirmVisible" class="modal-mask">
+      <div class="modal">
+        <div class="modal-title">无法按原编码保存</div>
+        <div class="modal-body">该文档为字节保真编码，新增的非 Latin-1 字符无法按原编码保存，是否另存为 UTF-8？</div>
+        <div class="modal-actions">
+          <button @click="confirmSaveAsUtf8">另存为 UTF-8</button>
+          <button @click="saveAsUtf8ConfirmVisible = false">取消</button>
         </div>
       </div>
     </div>

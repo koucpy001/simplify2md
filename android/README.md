@@ -110,3 +110,25 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew \
 - `[device]`（todo 8）：预览里点击外部链接会打开系统浏览器；打开文件 / 外部修改时页面能收到上表事件。
   无模拟器的 CI 只能验证到"处理器已注册 + 名称逐字一致 + 纯逻辑单测"，**不得**用"代码看起来对"冒充真机通过。
 - 桌面 `README.md:18` 的"原子替换"承诺仅适用于 Windows；Android 的保存语义见 todo 11。
+
+## 编码语义（todo 9，与桌面的两处差异）
+
+编码检测 / 解码 / 回写与换行保真逐条移植 `mdview/app.go:459-546`，全部在纯 JVM 单测中运行
+（`encoding/Encoding.kt`，只用 JDK 原生 charset，无 `android.icu.*`、无 Robolectric、无第三方编码库）。
+与桌面相比有两处**刻意**差异，均由计划的字节保真契约驱动：
+
+1. **字节保真回退显示为 `iso-8859-1`（桌面显示 `utf-8`）**。桌面把"既非合法 UTF-8 又非可信 CJK 检测"
+   的内容一律标为 `utf-8` 并原样回写；单一 `utf-8` 标签无法同时表达"真 UTF-8（`café` → `C3 A9`）"
+   与"字节保真回退（裸 `E9`）"，因此本移植用独立标签 `iso-8859-1` 承载回退，内容按"每字节 → 同码点"
+   映射，绝不插入 U+FFFD。工具栏的编码徽标会显示 `iso-8859-1`。
+2. **字节保真文档中键入非 Latin-1 字符（中文 / emoji）时提示"另存为 UTF-8"（桌面直接写成 UTF-8 字节、
+   不提示）**。`iso-8859-1` 回写用 `CharsetEncoder` 配置 `onUnmappableCharacter(REPORT)`，不可映射即
+   reject 并携带稳定令牌 `encoding-unmappable`，**绝不**用 Java 默认 REPLACE 静默写成 `?`；前端据该
+   令牌弹出"另存为 UTF-8"提示，且只在用户确认后才把 `fileEnc` 切到 `utf-8` 并走另存为。
+
+**探测顺序说明**：Go 原版在 GB18030/Big5 探测前先跑 `chardet` 统计检测；本移植不引入 chardet，
+而 GB18030 是近超集、能严格解码绝大多数字节序列（包括 Big5 文本），因此**先探测 Big5、后探测 GB18030**
+（Big5 更严格，严格解码成功是更强的信号），否则 Big5 文件会被误判为 GB18030 并在保存时被改写。
+等价性只对共享静态夹具语料断言（`android/tools/generate-encoding-fixtures.py` 生成，
+路径记录在 `.omo/evidence/task-9-android-apk-port.md`），不做"与 chardet 等价"声明。
+`[device]` 追加一次 GB18030/Big5 真机往返：Android 的 charset 由 ICU 提供，JVM 通过**不蕴含**真机通过。
