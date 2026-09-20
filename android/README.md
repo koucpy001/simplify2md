@@ -98,7 +98,7 @@ Intent 解析为纯 JVM 逻辑（`binding/IntentRouter.kt` + `IntentRouterTest` 
 |---|---|---|---|---|
 | `BridgeEvents.CONFIRM_EXIT` = `mdview:confirm-exit` | `AppEvents.confirmExit()` | `null` | `bridge-events.ts` | 返回键 → **todo 18** |
 | `BridgeEvents.OPEN_PATH` = `mdview:open-path` | `AppEvents.openPath(uri)` | JSON 字符串（文档 URI） | `bridge-events.ts` | `onNewIntent` / `ACTION_SEND` → **todo 18** |
-| `BridgeEvents.FILE_CHANGED` = `mdview:file-changed` | `AppEvents.fileChanged()` | `null` | `bridge-events.ts` | 前台刷新 → **todo 19** |
+| `BridgeEvents.FILE_CHANGED` = `mdview:file-changed` | `AppEvents.fileChanged()` | `null` | `bridge-events.ts` | 前台刷新（**todo 19，已实现**） |
 | `BridgeEvents.IME` = `mdview:ime` | `AppEvents.ime(heightPx)` | `{"height":<int>}`（物理像素） | `bridge-events.ts` | 根布局 inset 监听（**todo 17**，已实现） |
 
 前端的事件注册统一在 `mdview/frontend/src/lib/bridge-events.ts`（`registerBridgeEvents`，五个处理器
@@ -284,12 +284,39 @@ lazySrc 匹配到新文档节点（串图 / 缓存污染）。
 - 前端保持"提示 → `BrowserOpenURL` 打开下载页"（`App.vue:73-119`），不申请安装权限、不静默安装、不解析 APK 元数据；
 - 本地 `versionName` 目前是占位 `0.0.0`（todo 21 由 tag 注入）；调试构建会因此把任何 release 视为"有更新"，属预期。
 
+## 前台刷新替代文件监视（todo 19，明确语义）
+
+**Android 没有实时外部变更检测。** 这是相对桌面 fsnotify 监视的**如实降级**：SAF 文档 URI 无法
+监听，计划也**禁止轮询与后台线程**。等价物是"每次回到前台（`Activity.onResume`）评估一次"的策略
+（`storage/ForegroundRefresh.kt`，纯 JVM 可测；IO 抽象为 `CurrentDocument` + `ForegroundRefreshIo`）：
+
+| 条件 | 行为 | 说明 |
+|---|---|---|
+| 未打开文档（未标题 / URI 为空） | 什么都不做 | `NO_DOCUMENT` |
+| 落在**自写窗口**内（τ=500ms，同桌面 `mdview/app.go:226`） | 什么都不做 | 刚保存完的回前台**不**算外部变更（`SELF_WRITE`） |
+| `dirty == false` 且 URI 仍可读 | 重读文档 + 发 `mdview:file-changed` | 前端既有处理器在非脏时静默 `loadPath` 重载，界面内容刷新、无弹窗（`RELOADED`） |
+| `dirty == true` | **不重读**，只发一次 `mdview:file-changed` | 走前端**既有**询问弹窗；**绝不动编辑器缓冲区**（数据丢失点，`PROMPTED`） |
+| 读失败（被删 / 授权撤销） | 提示 + 走 `RemoveRecent` | 最近文件条目移除并弹 Toast（`UNAVAILABLE`） |
+
+要点：
+
+- **不做轮询、不起后台线程、不注册定时器**：策略只在 `onResume` 被调用一次（`MainActivity.onResume`），
+  无状态、可重入，重复前后台切换不会叠加（前端弹窗是单个布尔 ref）。
+- **`dirty == true` 绝不自动覆盖**：这是本 todo 存在的理由——外部变更 + 本地未保存时只弹窗询问，
+  由用户决定；Kotlin 侧不读文件，前端也不会在脏时静默 `loadPath`。
+- **自写窗口**：`SaveBindings` 在写入前调用 `SelfWriteWindow.mark()`（镜像 Go 在 `SaveFile` 顶部打标），
+  让"保存后立刻回前台"不被误判为外部改动；`SelfWriteWindowTest` 锁定 500ms 边界。
+- **无新事件、无新桥函数**：只复用冻结的 `mdview:file-changed`（`BridgeEvents.FILE_CHANGED`）。
+- 前端无需改动：`bridge-events.ts` 已注册该事件、`App.vue` 的处理器已按 dirty 分流。
+
 ## 限制与设备项
 
 - `[device]`：连续两次从文件管理器打开不同 `.md`，必须路由到**同一实例**
   （`launchMode="singleTask"` + `onNewIntent`）。无模拟器的 CI 无法执行，由 **todos 7/18** 在真机验证。
 - `[device]`（todo 8）：预览里点击外部链接会打开系统浏览器；打开文件 / 外部修改时页面能收到上表事件。
   无模拟器的 CI 只能验证到"处理器已注册 + 名称逐字一致 + 纯逻辑单测"，**不得**用"代码看起来对"冒充真机通过。
+- `[device]`（todo 19）：外部改动当前文档后切回前台——**无本地改动时内容刷新**；**有未保存改动时弹窗询问而非覆盖**。
+  无模拟器的 CI 只能用 JVM 单测覆盖三分支，端到端需真机（**DEVICE-DEFERRED**）。Android **无实时外部变更检测**（见上节）。
 - `[device]`（todo 11）：保存过程中强杀 → 重启出现原生三选一恢复弹窗，且默认项与长度判定一致。
   无模拟器无法执行（**DEVICE-DEFERRED**）。
 - `[device]`（todo 12）：最近文件下拉显示正确文件名（而非 `content://` 原文）且可重开；把已记录的文档在外部删除后再重开 →

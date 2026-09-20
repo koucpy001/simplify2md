@@ -57,8 +57,11 @@ import io.github.koucpy001.simplify2md.storage.AndroidSafLauncher
 import io.github.koucpy001.simplify2md.storage.AndroidSaveDocumentIo
 import io.github.koucpy001.simplify2md.storage.AndroidUriGrantReleaser
 import io.github.koucpy001.simplify2md.storage.AndroidUriPermissionStore
+import io.github.koucpy001.simplify2md.storage.CurrentDocument
 import io.github.koucpy001.simplify2md.storage.DraftBindings
 import io.github.koucpy001.simplify2md.storage.DraftStore
+import io.github.koucpy001.simplify2md.storage.ForegroundRefreshIo
+import io.github.koucpy001.simplify2md.storage.ForegroundRefreshPolicy
 import io.github.koucpy001.simplify2md.storage.ReconcileCoordinator
 import io.github.koucpy001.simplify2md.storage.ReconcileEngine
 import io.github.koucpy001.simplify2md.storage.ReconcileNotice
@@ -68,6 +71,7 @@ import io.github.koucpy001.simplify2md.storage.SafBindings
 import io.github.koucpy001.simplify2md.storage.SafStore
 import io.github.koucpy001.simplify2md.storage.SaveBindings
 import io.github.koucpy001.simplify2md.storage.SaveStore
+import io.github.koucpy001.simplify2md.storage.SelfWriteWindow
 import io.github.koucpy001.simplify2md.update.HttpUrlConnectionUpdateClient
 import io.github.koucpy001.simplify2md.update.UpdateBindings
 import io.github.koucpy001.simplify2md.update.UpdateChecker
@@ -185,6 +189,18 @@ class MainActivity : Activity() {
      * in todo 18; this class only records it.
      */
     private val dirtyFlag = DirtyFlag()
+
+    /**
+     * Desktop watcher's self-write window (plan todo 19). The save binding marks
+     * it before a write; [onResume] ignores refreshes while it is open.
+     */
+    private val selfWriteWindow = SelfWriteWindow()
+
+    /** Recents + the currently open URI; the resume policy reads/updates it. */
+    private lateinit var recents: RecentsStore
+
+    /** Foreground refresh policy (plan todo 19); created with the WebView. */
+    private lateinit var foregroundRefresh: ForegroundRefreshPolicy
 
     /**
      * API 33+ back-invoked callback (todo 18a). Registered with default
@@ -324,7 +340,7 @@ class MainActivity : Activity() {
         // Recents (todo 12): URI + provider DISPLAY_NAME persisted to
         // filesDir/config.json; the store also owns persisted-grant release and
         // tracks the currently open document so its grant is never released.
-        val recents = RecentsStore(
+        recents = RecentsStore(
             files = AndroidConfigFileSystem(filesDir),
             releaser = AndroidUriGrantReleaser(contentResolver),
         )
@@ -357,9 +373,10 @@ class MainActivity : Activity() {
         )
         ImageBindings(imageResolver).registerOn(bridge)
 
+        val documentReader = AndroidDocumentContentReader(contentResolver)
         SafBindings(
             safStore,
-            AndroidDocumentContentReader(contentResolver),
+            documentReader,
             recents,
             // A successful document load bumps the image generation and rejects
             // the previous document's pending tree requests (plan todo 13, D5).
@@ -367,8 +384,53 @@ class MainActivity : Activity() {
         ).registerOn(bridge)
         RecentsBindings(recents).registerOn(bridge)
 
+        // Foreground refresh (todo 19): the resumable replacement for the desktop
+        // fsnotify watcher. Dirty -> only the existing file-changed prompt; clean
+        // -> re-read + silent reload; unreadable -> RemoveRecent + prompt. No
+        // polling and no background thread: one evaluation per onResume.
+        foregroundRefresh = ForegroundRefreshPolicy(
+            current = object : CurrentDocument {
+                override fun uri(): String? = recents.current()
+                override fun isDirty(): Boolean = dirtyFlag.isDirty
+            },
+            io = object : ForegroundRefreshIo {
+                override fun isSelfWriteWindowActive(): Boolean = selfWriteWindow.isActive()
+
+                override fun canRead(uri: String): Boolean = try {
+                    contentResolver.openInputStream(Uri.parse(uri))?.use { true } ?: false
+                } catch (_: Exception) {
+                    false
+                }
+
+                override fun reRead(uri: String) {
+                    documentReader.read(uri)
+                }
+
+                override fun emitFileChanged() {
+                    appEvents.fileChanged()
+                }
+
+                override fun removeRecent(uri: String) {
+                    recents.remove(uri)
+                }
+
+                override fun notifyUnavailable(uri: String) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            R.string.foreground_document_gone,
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            },
+        )
+
         // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
-        SaveBindings(SaveStore(backupFs, saveIo, saveIo)).registerOn(bridge)
+        // The self-write window is opened BEFORE the write (todo 19), mirroring
+        // the Go watcher's mark at the top of SaveFile (`mdview/app.go:226`).
+        SaveBindings(SaveStore(backupFs, saveIo, saveIo), onSelfWrite = selfWriteWindow::mark)
+            .registerOn(bridge)
 
         // Autosave drafts (todo 14): app-private filesDir/autosave/, keys are
         // sha1(uri) or the literal "untitled" (DraftKey.of, matching App.vue).
@@ -568,6 +630,19 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         routeLaunchIntent(intent, warmStart = true)
+    }
+
+    /**
+     * The entire external-change detection mechanism (plan todo 19): evaluated on
+     * resume only — no polling, no timer, no background thread. Until the WebView
+     * (and thus the policy) exists, a resume has nothing to refresh and is
+     * skipped; the first real resume after a document was opened does the work.
+     */
+    override fun onResume() {
+        super.onResume()
+        if (::foregroundRefresh.isInitialized) {
+            foregroundRefresh.onResume()
+        }
     }
 
     override fun onDestroy() {

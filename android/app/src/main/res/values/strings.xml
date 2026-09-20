@@ -21,4 +21,8 @@
     <!-- WebView minimum-version gate (todo 17f): the embedded engine is too old
          for the IME/inset behaviour; input problems are possible. -->
     <string name="ime_webview_outdated">系统 WebView 版本过低，输入法行为可能异常，建议更新系统 WebView</string>
+
+    <!-- Foreground refresh (todo 19): the open document can no longer be read
+         (deleted externally, or the SAF grant was revoked on resume). -->
+    <string name="foreground_document_gone">当前文档已无法读取（可能已被删除或授权已撤销），已从最近文件中移除</string>
 </resources>

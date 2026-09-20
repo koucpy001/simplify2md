@@ -18,10 +18,21 @@ import org.json.JSONArray
  * [BridgeMethods.WHITELIST]; `SaveFile` is already a member, so registering it
  * cannot widen the dispatch surface and adds no bridge function.
  */
-class SaveBindings(private val store: SaveStore) {
+class SaveBindings(
+    private val store: SaveStore,
+    /**
+     * Opens the self-write window (plan todo 19) before the write starts,
+     * mirroring the Go watcher's `lastSelfWriteNs` mark at the top of
+     * `SaveFile` (`mdview/app.go:226`). A resume during or just after our own
+     * save is therefore never mistaken for an external change. Defaults to a
+     * no-op so the save semantics are unchanged when recents are not wired.
+     */
+    private val onSelfWrite: () -> Unit = {},
+) {
 
     suspend fun saveFile(path: String, content: String, encoding: String, newline: String) {
         if (path.isBlank()) throw BridgeException("empty path")
+        onSelfWrite()
         val encoded = try {
             EncodingCodec.encodeContent(EncodingCodec.applyNewline(content, newline), encoding)
         } catch (e: EncodingCodec.EncodingException) {
