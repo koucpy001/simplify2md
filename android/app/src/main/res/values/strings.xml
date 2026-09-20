@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">simplify2md</string>
+    <string name="saf_session_grant">该来源不支持持久授权，重启后需重新选择</string>
 </resources>

@@ -30,11 +30,16 @@ import { EditorView } from '@codemirror/view'
 import { createMarkdownEditor, setEditorHighlight, replaceEditorDoc } from './lib/cm-editor'
 import { LruCache } from './lib/lru'
 import { remedyForToken, saveAsUtf8 } from './lib/encoding-token'
+import { saveAction } from './lib/save-policy'
 
 const source = ref('')
 const filePath = ref('')
 const fileEnc = ref('utf-8')
 const fileNewline = ref('lf')
+// SAF read-only state and provider display name (Android). On desktop both stay
+// false / '' unless a binding supplies them, so shared behaviour is unchanged.
+const readonly = ref(false)
+const currentName = ref('')
 const previewHtml = ref('')
 const imageRoot = ref<string | null>(null)
 const status = ref('')
@@ -518,6 +523,12 @@ function applyLoaded(r: OpenResultLike) {
   if (source.value !== r.content) source.value = r.content
   fileEnc.value = r.encoding || 'utf-8'
   fileNewline.value = r.newline || 'lf'
+  // SAF-derived state (Android): a document whose provider reports no
+  // FLAG_SUPPORTS_WRITE is read-only (save() routes to saveAs()), and the
+  // provider DISPLAY_NAME feeds the toolbar / save-as default. Desktop leaves
+  // both at their defaults (false / '').
+  readonly.value = r.readonly === true
+  currentName.value = r.name || ''
   imageRoot.value = extractImageRoot(r.content)
   imageCache.clear()
   markClean()
@@ -580,7 +591,9 @@ async function open() {
 }
 
 async function save() {
-  if (!filePath.value) {
+  // Untitled documents and read-only SAF documents (no FLAG_SUPPORTS_WRITE)
+  // have nowhere to write: both route through saveAs() (plan todo 10(g2)).
+  if (saveAction({ filePath: filePath.value, readonly: readonly.value }) === 'saveAs') {
     await saveAs()
     return
   }
@@ -604,14 +617,14 @@ async function saveAs() {
     const p = await PickSavePath(filePath.value ? baseName(filePath.value) : '未标题.md')
     if (!p) return
     await SaveFile(p, source.value, fileEnc.value, fileNewline.value)
-    finalizeSaveAs(p)
+    await finalizeSaveAs(p)
   } catch (e: any) {
     await handleUnmappableSave(e)
   }
 }
 
 // Post-save bookkeeping shared by saveAs and the "另存为 UTF-8" remedy.
-function finalizeSaveAs(p: string) {
+async function finalizeSaveAs(p: string) {
   // The untitled draft (if any) is now superseded by the real file.
   const oldPath = filePath.value
   filePath.value = p
@@ -620,7 +633,14 @@ function finalizeSaveAs(p: string) {
   if (oldPath) abandonDraftFor(oldPath)
   else abandonDraftFor('')
   status.value = '已保存 ' + new Date().toLocaleTimeString()
-  void refreshRecents()
+  // A successful save-as rebinds filePath to a new (writable) document: the
+  // read-only flag no longer applies, and the toolbar name must follow the new
+  // file (plan todo 10(g1), review D1/Momus#1). The name is re-read from the
+  // recents entry so it stays the provider DISPLAY_NAME, never the URI tail.
+  readonly.value = false
+  await refreshRecents()
+  const entry = recents.value.find((e) => e.id === p)
+  if (entry) currentName.value = entry.name
 }
 
 // A SaveFile rejection carrying `encoding-unmappable` means the document is
@@ -654,7 +674,7 @@ async function runSaveAsUtf8Remedy() {
     fileNewline.value,
   )
   if (result.saved && result.path) {
-    finalizeSaveAs(result.path)
+    await finalizeSaveAs(result.path)
   } else {
     // Picker cancelled: the document is still byte-fidelity, so restore the
     // original label or a later plain save would write the latin1-mapped

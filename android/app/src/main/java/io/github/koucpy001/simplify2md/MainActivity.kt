@@ -11,6 +11,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.webkit.WebViewAssetLoader
 import io.github.koucpy001.simplify2md.binding.DesktopOnlyBindings
 import io.github.koucpy001.simplify2md.binding.DirtyFlag
@@ -20,6 +21,12 @@ import io.github.koucpy001.simplify2md.binding.ExternalUrlLauncher
 import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
+import io.github.koucpy001.simplify2md.storage.AndroidDocumentContentReader
+import io.github.koucpy001.simplify2md.storage.AndroidDocumentMetadataReader
+import io.github.koucpy001.simplify2md.storage.AndroidSafLauncher
+import io.github.koucpy001.simplify2md.storage.AndroidUriPermissionStore
+import io.github.koucpy001.simplify2md.storage.SafBindings
+import io.github.koucpy001.simplify2md.storage.SafStore
 import io.github.koucpy001.simplify2md.web.AssetPathMapper
 import io.github.koucpy001.simplify2md.web.AssetWebViewPathHandler
 
@@ -52,6 +59,13 @@ class MainActivity : Activity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var bridge: Bridge
     private lateinit var bindings: DesktopOnlyBindings
+
+    /**
+     * Pre-registered SAF picker (plan todo 10). Its fixed request code is routed
+     * in [onActivityResult]; the single outstanding pick is gated by
+     * [Bridge.pickerSlot], which is shared with `PickSavePath`.
+     */
+    private lateinit var safLauncher: AndroidSafLauncher
 
     /**
      * `BrowserOpenURL` policy plus the Android launch glue. The glue catches
@@ -129,6 +143,24 @@ class MainActivity : Activity() {
         ExternalLinksBindings(externalLinks).registerOn(bridge)
         appEvents = AppEvents { name, payloadJson -> bridge.emitEvent(name, payloadJson) }
 
+        // SAF open / save-as (todo 10). The picker shares bridge.pickerSlot, so
+        // OpenFile and PickSavePath cannot both be outstanding.
+        safLauncher = AndroidSafLauncher(this)
+        val safStore = SafStore(
+            pickerSlot = bridge.pickerSlot,
+            launcher = safLauncher,
+            metadata = AndroidDocumentMetadataReader(contentResolver),
+            permissions = AndroidUriPermissionStore(contentResolver),
+            onSessionGrant = {
+                // The grant works this session but will not survive a restart;
+                // say so instead of failing later.
+                runOnUiThread {
+                    Toast.makeText(this, R.string.saf_session_grant, Toast.LENGTH_LONG).show()
+                }
+            },
+        )
+        SafBindings(safStore, AndroidDocumentContentReader(contentResolver)).registerOn(bridge)
+
         // A stable root container so later todos (IME insets in todo 17) can
         // attach an OnApplyWindowInsetsListener without touching the WebView.
         val root = FrameLayout(this)
@@ -160,6 +192,15 @@ class MainActivity : Activity() {
         settings.allowUniversalAccessFromFileURLs = false
 
         webViewClient = AssetServingWebViewClient(assetLoader, externalLinks)
+    }
+
+    /**
+     * Routes the pre-registered SAF picker result back to [safLauncher]. This
+     * Activity uses no other request code, so nothing is forwarded to the
+     * deprecated super implementation.
+     */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        safLauncher.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onDestroy() {

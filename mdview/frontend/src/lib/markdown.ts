@@ -19,7 +19,9 @@ import DOMPurify from 'dompurify';
 // concurrent-safe across interleaved renders.
 let lastFrontMatterRaw: string | null = null;
 
-const katexPlugin: any = (katex as any).default ?? katex;
+// CJS/ESM interop guard: some bundler configurations hand the default import
+// as `{ default: fn }`. The explicit cast avoids a blanket type assertion.
+const katexPlugin: any = (katex as unknown as { default?: unknown }).default ?? katex;
 
 // `html: true` lets documents embed inline HTML like
 // `<img src=… style="zoom:50%;">`, `<details>`, `<sub>`, or raw `<table>` —
@@ -58,9 +60,9 @@ export const md = new MarkdownIt({
   .use(frontMatter, (fm: string) => {
     lastFrontMatterRaw = fm;
   })
-  // `permalink: false` trips markdown-it-anchor's narrow typings — the
-  // runtime option is a plain boolean.
-  .use(anchor, { permalink: false, slugify: (s: string) => slugify(s) } as any)
+  // `permalink` is omitted: the runtime default is `false` (no permalink), and
+  // the narrow `permalink?: PermalinkGenerator` typing rejects an explicit false.
+  .use(anchor, { slugify: (s: string) => slugify(s) })
   .use(katexPlugin, { throwOnError: false })
   .use(footnote)
   .use(mark)
