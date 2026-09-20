@@ -102,6 +102,22 @@ console.log('dispatch             -> all five callbacks invoked with correct pay
   console.log('ready gate           -> pending modal blocks ready; exactly one ready per exit')
 }
 
+// ---- 3b. BOTH onMounted exit paths reach ready exactly once (todo 18g) --------
+{
+  let readyCalls = 0
+  const gate = createStartupReadyGate(() => { readyCalls += 1 })
+  // Branch A: startup-file early return — postStartup hold, no modal, release.
+  gate.hold()
+  gate.release()
+  assert.equal(readyCalls, 1, 'branch A (startup-file) must reach ready exactly once')
+  // Branch B: recents-restore tail — hold, draft modal pending, modal settles.
+  gate.hold()
+  assert.equal(readyCalls, 1, 'branch B pending modal must not fire ready again')
+  gate.release()
+  assert.equal(readyCalls, 1, 'branch B must not fire ready a second time (once per lifetime)')
+  console.log('both onMounted branches -> each reaches ready; exactly one ready total')
+}
+
 // ---- 4. pure helpers re-exported sanity (full boundaries in test-ime-helper) --
 assert.equal(imeInsetPx(120), '120px')
 assert.equal(IME_HEIGHT_CSS_VAR, '--mdview-ime-height')

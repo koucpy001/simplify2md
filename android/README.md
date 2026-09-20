@@ -29,21 +29,34 @@ android/
 `binding/DirtyFlag.kt`；`registerOn(bridge)` 经 `Bridge.registerHandler` 注册，而后者以
 `BridgeMethods.WHITELIST` 做前置断言（`require(isKnown)`），因此不会扩大分派面。
 
-## Intent 排队规则
+## Intent 排队规则（todo 18）
 
-冷启动与热启动走**两条互斥的通道**，同一 URI 绝不重复派发：
+冷启动与热启动走**两条互斥的通道**，同一 URI 绝不重复派发（单一交付规则，评审 H1/NEW-1）：
 
-1. **冷启动文件类 intent**（`ACTION_VIEW` / `ACTION_EDIT` 的 `data` URI）**不进队列**：
-   在 `MainActivity.onCreate` 记入 `StartupFileGate`，由前端 `GetStartupFile` consume-once 取走
-   （第二次为 `""`）。启动时没有文件（`dataString == null`）时仍回答 `""`，绝不触发空路径打开。
-2. **热启动 intent**（`onNewIntent` 到达）**缓冲至 bridge-ready 后按序派发**：由
-   `ReadyEventQueue` 在 ready 前入队、`markReady()` 时按到达顺序重放；ready 后即时派发。
-3. **`ACTION_SEND` 的载荷按类型走事件**：`EXTRA_TEXT`（纯文本）经 `mdview:open-text` 交付，
-   作为"未命名文档"载入；`EXTRA_STREAM`（URI）经 `mdview:open-path` 交付。
-4. `ACTION_EDIT` 与 `ACTION_VIEW` **同处理**，不做区分。
+1. **冷启动文件类 intent**（`ACTION_VIEW` / `ACTION_EDIT` 的 `data` URI，或 `ACTION_SEND` +
+   `EXTRA_STREAM`）**不进队列**：在 `MainActivity.onCreate` 经 `IntentRouter` 判定后记入
+   `StartupFileGate`，由前端 `GetStartupFile` consume-once 取走（第二次为 `""`）。
+   文件 URI 只接受 `content:` / `file:` scheme；`javascript:` 等一律忽略。
+2. **冷启动纯文本 intent**（`ACTION_SEND` + `EXTRA_TEXT`，无 STREAM）由 Kotlin 侧
+   `StartupTextBuffer` **单独缓冲**，并在 bridge-ready（即 JS 完成事件注册、消费完
+   `GetStartupFile`、启动恢复 settle、草稿恢复弹窗 settle 之后）经 `mdview:open-text`
+   **一次性派发**——不缓冲则首次"分享文本到应用"会静默丢失。
+3. **热启动 intent**（`onNewIntent` 到达，先 `setIntent`）**进入事件队列**：由
+   `ReadyEventQueue` 在 ready 前入队、`markReady()` 时按到达顺序重放；**ready 后每次入队
+   都立即派发**（`ReadyImmediateDispatchTest` 锁定，防止热启动 intent 滞留队列）。
+4. **同一 intent 同时带 `EXTRA_STREAM` 与 `EXTRA_TEXT` 时，`EXTRA_STREAM` 优先、
+   `EXTRA_TEXT` 忽略**（写死优先级，禁止两载体同时投递）。
+5. `ACTION_EDIT` 与 `ACTION_VIEW` **同处理**，不做区分（编辑/预览由前端视图模式决定）。
+6. `ACTION_SEND` 纯文本经**事件** `mdview:open-text` 交付（payload 为文本），`App.vue`
+   以 `filePath=''`、`currentName=''`、`readonly=false` 载入并标记 dirty，且**必须走与
+   `open-path` 相同的 `requestSwitch` 脏文档守卫**——绝不直接覆盖未保存内容。
+7. 返回键守卫（`BackKeyGuard`）：有未保存改动 → `mdview:confirm-exit` 走前端既有守卫；
+   干净 → `finish()`。API 33+ 经 `OnBackInvokedCallback`（默认优先级，预测性返回不会绕过
+   守卫自动退出），API <33 走 `onBackPressed` 兜底。
 
-> 待办：`mdview:open-text` 的 `App.vue` 事件处理器（以及 `mdview:open-path` 的守卫语义）
-> 由 **todo 18** 完成；本 todo 只固定上述通道契约。`ACTION_SEND` 的 Intent 解析同样归 todo 18。
+Intent 解析为纯 JVM 逻辑（`binding/IntentRouter.kt` + `IntentRouterTest` 逐格覆盖交付矩阵；
+`binding/StartupTextBuffer.kt`、`binding/BackKeyGuard.kt` 各有 JVM 单测），`MainActivity`
+只做 payload 抽取与路由应用。
 
 ## `@bridge` 导出符号核对
 

@@ -49,6 +49,19 @@ class AppEvents(private val emitter: (name: String, payloadJson: String) -> Unit
         emit(BridgeEvents.IME, "{\"height\":$heightPx}")
     }
 
+    /**
+     * `mdview:open-text` (todo 18): shared plain text, loaded by `App.vue` as an
+     * unnamed dirty document through the same `requestSwitch` guard as
+     * `open-path`. The name is deliberately NOT in [BridgeEvents.REGISTERED]
+     * (`BridgeEventsTest` pins `isRegistered("mdview:open-text") == false`):
+     * it is a frontend-only event name, so it bypasses the typo guard and is
+     * spelled literally here. The payload is JSON-encoded, so U+2028/U+2029 and
+     * lone surrogates in the shared text cannot break the JS call.
+     */
+    fun openText(text: String) {
+        emitter("mdview:open-text", BridgeCodec.quote(text))
+    }
+
     private fun emit(name: String, payloadJson: String) {
         require(BridgeEvents.isRegistered(name)) { "not a registered event name: $name" }
         emitter(name, payloadJson)

@@ -66,6 +66,16 @@ class Bridge(
     }
 
     /**
+     * One-shot callback for the first `__bridgeReady` of a JS context (todo 18):
+     * the host flushes the cold-start shared-text buffer here, AFTER the
+     * frontend finished event registration, consumed `GetStartupFile` and let
+     * the draft-recovery modal settle.
+     */
+    fun setReadyListener(listener: (() -> Unit)?) {
+        transport.readyListener = listener
+    }
+
+    /**
      * Delivers a call. Returns immediately; the handler runs off this thread and
      * the result is posted back to the main thread after the registry confirms
      * the request is still live.

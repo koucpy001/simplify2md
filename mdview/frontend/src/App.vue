@@ -39,6 +39,7 @@ import {
   registerBridgeEvents,
   createStartupReadyGate,
   IME_HEIGHT_CSS_VAR,
+  type OpenTextPayload,
 } from './lib/bridge-events'
 
 const source = ref('')
@@ -636,6 +637,22 @@ function confirmSwitch() {
 function cancelSwitch() {
   pendingSwitchAction.value = null
   switchConfirmVisible.value = false
+}
+
+// Body of the mdview:open-text handler (todo 18): load the shared text as an
+// unnamed, dirty, writable document. Called only through requestSwitch.
+function applyOpenText(payload: OpenTextPayload) {
+  loadingFile = true
+  filePath.value = payload.filePath
+  currentName.value = ''
+  readonly.value = false
+  if (editorView) replaceEditorDoc(editorView, payload.content)
+  if (source.value !== payload.content) source.value = payload.content
+  markDirty()
+  imageRoot.value = extractImageRoot(payload.content)
+  imageCache.clear()
+  render()
+  setTimeout(() => { loadingFile = false }, 0)
 }
 
 async function open() {
@@ -1398,19 +1415,11 @@ onMounted(async () => {
       }
     },
     openText: (payload) => {
-      // Shared plain text -> unnamed document (todo 17 registers the handler;
-      // todo 18 adds the requestSwitch dirty-guard and the Kotlin routing).
-      loadingFile = true
-      filePath.value = payload.filePath
-      currentName.value = ''
-      readonly.value = false
-      if (editorView) replaceEditorDoc(editorView, payload.content)
-      if (source.value !== payload.content) source.value = payload.content
-      markDirty()
-      imageRoot.value = extractImageRoot(payload.content)
-      imageCache.clear()
-      render()
-      setTimeout(() => { loadingFile = false }, 0)
+      // Shared plain text -> unnamed document. MUST go through the SAME
+      // requestSwitch dirty-document guard as open-path (todo 18): it must
+      // never directly overwrite unsaved content. Desktop never emits
+      // mdview:open-text, so desktop behaviour is unchanged.
+      requestSwitch(() => { applyOpenText(payload) })
     },
   })
   updateTitle()

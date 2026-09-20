@@ -1,5 +1,6 @@
 package io.github.koucpy001.simplify2md
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -7,6 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -18,12 +21,17 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewAssetLoader
+import io.github.koucpy001.simplify2md.binding.BackKeyGuard
 import io.github.koucpy001.simplify2md.binding.DesktopOnlyBindings
 import io.github.koucpy001.simplify2md.binding.DirtyFlag
 import io.github.koucpy001.simplify2md.binding.ExternalLinks
 import io.github.koucpy001.simplify2md.binding.ExternalLinksBindings
 import io.github.koucpy001.simplify2md.binding.ExternalUrlLauncher
+import io.github.koucpy001.simplify2md.binding.IntentPayload
+import io.github.koucpy001.simplify2md.binding.IntentRoute
+import io.github.koucpy001.simplify2md.binding.IntentRouter
 import io.github.koucpy001.simplify2md.binding.StartupFileGate
+import io.github.koucpy001.simplify2md.binding.StartupTextBuffer
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
 import io.github.koucpy001.simplify2md.ime.WebViewMinVersion
@@ -163,10 +171,36 @@ class MainActivity : Activity() {
     private val startupFileGate = StartupFileGate()
 
     /**
+     * Cold-start SHARED PLAIN TEXT (`ACTION_SEND` + `EXTRA_TEXT`, todo 18). It
+     * does not enter the event queue (single-delivery rule: the queue is for
+     * warm `onNewIntent` only) and is flushed exactly once when the frontend
+     * signals bridge-ready — after `GetStartupFile` was consumed, the startup
+     * restore settled and the draft-recovery modal settled, so a shared text
+     * can never overwrite draft recovery.
+     */
+    private val startupTextBuffer = StartupTextBuffer()
+
+    /**
      * Document modified flag reported by `SetDirty`. The back-key guard reads it
      * in todo 18; this class only records it.
      */
     private val dirtyFlag = DirtyFlag()
+
+    /**
+     * API 33+ back-invoked callback (todo 18a). Registered with default
+     * priority: the system does NOT auto-finish behind it, so the guard fully
+     * owns the decision and predictive back cannot bypass the exit guard.
+     */
+    private val backInvokedCallback =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            object : OnBackInvokedCallback {
+                override fun onBackInvoked() {
+                    handleBackKey()
+                }
+            }
+        } else {
+            null
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -178,13 +212,24 @@ class MainActivity : Activity() {
         // viewport resize that could cancel or double-deduct these insets.
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        // Cold-start file intents (ACTION_VIEW / ACTION_EDIT) travel ONLY through
-        // GetStartupFile (consume-once) and never through the event queue — see
-        // android/README.md, "Intent 排队规则". `dataString` is null for
-        // ACTION_SEND (its payload lives in EXTRA_TEXT / EXTRA_STREAM) and for
-        // fileless launches, in which case the gate answers "". ACTION_SEND and
-        // onNewIntent dispatch are owned by todo 18.
-        startupFileGate.record(intent?.dataString)
+        // Cold-start intent routing (todo 18c): FILE intents (ACTION_VIEW /
+        // ACTION_EDIT / ACTION_SEND + EXTRA_STREAM) travel ONLY through
+        // GetStartupFile (consume-once) and never through the event queue;
+        // PURE-TEXT intents (ACTION_SEND + EXTRA_TEXT) are buffered in
+        // [startupTextBuffer] and dispatched as `mdview:open-text` after
+        // bridge-ready. See android/README.md, "Intent 排队规则".
+        routeLaunchIntent(intent, warmStart = false)
+
+        // Predictive back (todo 18g): on API 33+ the manifest's
+        // enableOnBackInvokedCallback routes the back gesture to THIS callback
+        // (default priority), so the system never finishes behind our back and
+        // the exit guard cannot be bypassed. Below API 33 onBackPressed runs.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                backInvokedCallback,
+            )
+        }
 
         // Token table for the /media/<token> image endpoint; must exist before
         // the asset loader so the path handler can be registered.
@@ -255,6 +300,10 @@ class MainActivity : Activity() {
         bindings.registerOn(bridge)
         ExternalLinksBindings(externalLinks).registerOn(bridge)
         appEvents = AppEvents { name, payloadJson -> bridge.emitEvent(name, payloadJson) }
+
+        // Cold-start shared text (todo 18e): flushed exactly once when the JS
+        // context signals ready — never queued, never re-delivered.
+        bridge.setReadyListener { flushStartupText() }
 
         // SAF open / save-as (todo 10). The picker shares bridge.pickerSlot, so
         // OpenFile and PickSavePath cannot both be outstanding.
@@ -436,10 +485,98 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Routes a launch intent through the delivery matrix (todo 18c-e). The
+     * decision is pure ([IntentRouter]); this glue only extracts the payload
+     * and applies the route. Warm routes require [appEvents], which exists only
+     * after the WebView is set up — a warm intent arriving before that (the
+     * reconciliation gate) is dropped rather than crashed on.
+     */
+    private fun routeLaunchIntent(intent: Intent?, warmStart: Boolean) {
+        if (intent == null) return
+        val payload = IntentPayload(
+            action = intent.action,
+            dataUri = intent.dataString,
+            extraText = intent.getStringExtra(Intent.EXTRA_TEXT),
+            extraStreamUri = readExtraStreamUri(intent),
+        )
+        when (val route = IntentRouter.route(payload, warmStart)) {
+            is IntentRoute.ColdFile -> startupFileGate.record(route.uri)
+            is IntentRoute.ColdText -> startupTextBuffer.record(route.text)
+            is IntentRoute.WarmFile -> if (::appEvents.isInitialized) appEvents.openPath(route.uri)
+            is IntentRoute.WarmText -> if (::appEvents.isInitialized) appEvents.openText(route.text)
+            IntentRoute.Ignore -> Unit
+        }
+    }
+
+    /**
+     * `EXTRA_STREAM` is a Uri (or a list of Uris); anything else — a String, a
+     * foreign Parcelable, garbage — is NOT a URI and is dropped so a malformed
+     * share can never leak arbitrary text into the file path.
+     */
+    private fun readExtraStreamUri(intent: Intent): String? {
+        val raw = intent.extras?.get(Intent.EXTRA_STREAM) ?: return null
+        return when (raw) {
+            is Uri -> raw.toString()
+            is List<*> -> raw.filterIsInstance<Uri>().firstOrNull()?.toString()
+            else -> null
+        }
+    }
+
+    /** Flushes the buffered cold-start shared text; consume-once, ready-gated. */
+    private fun flushStartupText() {
+        val text = startupTextBuffer.consume() ?: return
+        if (::appEvents.isInitialized) appEvents.openText(text)
+    }
+
+    /**
+     * Back key (todo 18a): dirty -> `mdview:confirm-exit` so the EXISTING
+     * frontend guard runs; clean -> finish. Never exits by bypassing the guard.
+     */
+    private fun handleBackKey() {
+        val dirty = if (::bindings.isInitialized) bindings.dirty.isDirty else false
+        when (BackKeyGuard.decide(dirty)) {
+            BackKeyGuard.Action.EMIT_CONFIRM_EXIT ->
+                if (::appEvents.isInitialized) appEvents.confirmExit() else finish()
+            BackKeyGuard.Action.FINISH -> finish()
+        }
+    }
+
+    /**
+     * API < 33 fallback only (lint GestureBackNavigation suppressed deliberately:
+     * on 33+ the manifest's enableOnBackInvokedCallback routes the gesture to
+     * [backInvokedCallback], and androidx's OnBackPressedDispatcher would need
+     * ComponentActivity, which this shell deliberately does not use).
+     */
+    @SuppressLint("GestureBackNavigation")
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            handleBackKey()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    /**
+     * Warm start (todo 18b): `singleTask` reuses this instance for a launch
+     * from a file manager, so the new intent arrives here. `setIntent` is
+     * MANDATORY — without it `getIntent` keeps returning the stale launch
+     * intent and a recreated process would re-deliver the old URI.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        routeLaunchIntent(intent, warmStart = true)
+    }
+
     override fun onDestroy() {
         // Stop the reconciliation coroutine: destroying the Activity must not
         // leave a dialog or IO continuation alive.
         scope.cancel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backInvokedCallback)
+        }
         if (::bridge.isInitialized) {
             bridge.onActivityDestroying()
         }

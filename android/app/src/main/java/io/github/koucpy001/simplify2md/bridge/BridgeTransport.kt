@@ -31,6 +31,16 @@ class BridgeTransport(
     private val pending = PendingRegistry()
     private val readyQueue = ReadyEventQueue()
 
+    /**
+     * Invoked ONCE per JS context when [markReady] first flips ready (after the
+     * queued events were drained). The host uses it to flush the cold-start
+     * shared-text buffer (todo 18): that buffer must be dispatched after
+     * bridge-ready but does NOT travel through the queue itself. [reset] clears
+     * the flag so a reloaded page notifies again.
+     */
+    var readyListener: (() -> Unit)? = null
+    private var readyListenerFired = false
+
     fun registerHandler(method: String, handler: BridgeHandler) {
         require(BridgeMethods.isKnown(method)) { "not a whitelisted bridge method: $method" }
         handlers[method] = handler
@@ -89,6 +99,10 @@ class BridgeTransport(
         for (event in readyQueue.markReady()) {
             effects.emit(event.name, event.payloadJson)
         }
+        if (!readyListenerFired) {
+            readyListenerFired = true
+            readyListener?.invoke()
+        }
     }
 
     /**
@@ -99,6 +113,7 @@ class BridgeTransport(
     fun reset() {
         pending.clear()
         readyQueue.reset()
+        readyListenerFired = false
     }
 
     fun isReady(): Boolean = readyQueue.isReady
