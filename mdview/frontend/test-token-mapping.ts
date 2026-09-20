@@ -17,6 +17,7 @@ import {
   saveAsUtf8,
   type SaveAsUtf8Deps,
 } from './src/lib/encoding-token'
+import { IMAGE_TOKENS, imageStatusHint, imageTokenOf } from './src/lib/image-token'
 
 // ---- pure mapping: token -> remedy -----------------------------------------
 
@@ -95,3 +96,44 @@ function makeDeps(rec: RecordingDeps): SaveAsUtf8Deps {
 
 console.log('')
 console.log('TOKEN MAPPING OK: remedy mapping + fileEnc-before-PickSavePath ordering hold.')
+
+// ---- image tokens (plan todo 13f) ------------------------------------------
+// The Kotlin resolver rejects relative-image failures with one of these five
+// stable tokens; the frontend maps them to informational status hints. The set
+// is asserted here so a token rename breaks the gate instead of silently
+// showing a raw error string.
+
+const IMAGE_TOKEN_VALUES = Object.values(IMAGE_TOKENS)
+assert.deepStrictEqual(
+  [...IMAGE_TOKEN_VALUES].sort(),
+  [
+    'image-denied',
+    'image-not-in-tree',
+    'image-too-large',
+    'image-tree-cancelled',
+    'image-unsupported-provider',
+  ],
+  'the image token set must be exactly the five plan tokens',
+)
+
+assert.strictEqual(imageTokenOf('image-not-in-tree: /x.png'), IMAGE_TOKENS.NOT_IN_TREE)
+assert.strictEqual(imageTokenOf('image-unsupported-provider'), IMAGE_TOKENS.UNSUPPORTED_PROVIDER)
+assert.strictEqual(imageTokenOf('image-too-large: 7MB'), IMAGE_TOKENS.TOO_LARGE)
+assert.strictEqual(imageTokenOf('image-denied'), IMAGE_TOKENS.DENIED)
+assert.strictEqual(imageTokenOf('image-tree-cancelled'), IMAGE_TOKENS.TREE_CANCELLED)
+assert.strictEqual(imageTokenOf('cancelled'), null)
+assert.strictEqual(imageTokenOf(''), null)
+assert.strictEqual(imageTokenOf(undefined), null)
+assert.strictEqual(imageTokenOf(null), null)
+assert.strictEqual(imageTokenOf(42), null)
+assert.strictEqual(imageTokenOf(new Error('image-too-large')), null, 'an Error object is not a message string')
+
+for (const token of IMAGE_TOKEN_VALUES) {
+  assert.ok(imageStatusHint(token).length > 0, `token ${token} must map to a non-empty hint`)
+}
+assert.strictEqual(imageStatusHint('cancelled'), '')
+assert.strictEqual(imageStatusHint(''), '')
+assert.strictEqual(imageStatusHint(undefined), '')
+assert.strictEqual(imageStatusHint('image-superseded'), '', 'internal superseded token is not user-facing')
+
+console.log('image tokens OK: five plan tokens map to non-empty hints; non-token messages map to empty')

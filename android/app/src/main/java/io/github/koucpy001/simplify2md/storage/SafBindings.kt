@@ -35,6 +35,7 @@ class SafBindings(
     private val store: SafStore,
     private val reader: DocumentContentReader,
     private val recents: RecentsSink = NoRecents,
+    private val onDocumentLoaded: (String) -> Unit = {},
 ) {
 
     /** `OpenFile`: pick a document, then read and decode it. */
@@ -42,6 +43,7 @@ class SafBindings(
         val doc = store.openDocument()
         val json = load(doc)
         remember(doc)
+        onDocumentLoaded(doc.uri)
         return json
     }
 
@@ -56,6 +58,7 @@ class SafBindings(
         val doc = store.describe(uri)
         val json = load(doc)
         remember(doc)
+        onDocumentLoaded(doc.uri)
         return json
     }
 

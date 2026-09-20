@@ -30,6 +30,7 @@ import { EditorView } from '@codemirror/view'
 import { createMarkdownEditor, setEditorHighlight, replaceEditorDoc } from './lib/cm-editor'
 import { LruCache } from './lib/lru'
 import { remedyForToken, saveAsUtf8 } from './lib/encoding-token'
+import { imageStatusHint } from './lib/image-token'
 import { saveAction } from './lib/save-policy'
 import { baseName, dirOf, selectDisplayName } from './lib/paths'
 import { decideDraftTarget, draftFilePath } from './lib/draft-binding'
@@ -55,6 +56,11 @@ let editorView: EditorView | null = null
 // never retried, so a missing image isn't re-read from disk on every re-render.
 const imageCache = new LruCache()
 const imageInFlight = new Map<string, Promise<void>>()
+// Per-document generation for relative-image resolution (plan todo 13, D5):
+// applyLoaded bumps it on every document switch, so a late result from the
+// previous document is discarded instead of being matched by lazy id + lazySrc
+// against the new document's nodes (cross-wiring) or polluting the cache.
+let imageGeneration = 0
 let renderTimer: ReturnType<typeof setTimeout> | null = null
 let loadingFile = false
 const exitConfirmVisible = ref(false)
@@ -547,6 +553,10 @@ function applyLoaded(r: OpenResultLike) {
   readonly.value = r.readonly === true
   currentName.value = r.name || ''
   imageRoot.value = extractImageRoot(r.content)
+  // Document switch: bump the generation and drop the previous document's
+  // in-flight image fetches so their late results are discarded (todo 13 D5).
+  imageGeneration += 1
+  imageInFlight.clear()
   imageCache.clear()
   markClean()
   refreshRecents()
@@ -1063,6 +1073,9 @@ async function hydrateImage(img: HTMLImageElement) {
   const src = img.dataset.lazySrc || ''
   if (!src) return
   const key = filePath.value + '|' + src
+  // Capture the current generation: a document switch while this fetch is in
+  // flight must discard the result (no cache write, no node fill-in).
+  const gen = imageGeneration
   // Already cached (e.g. loaded for a sibling node): skip the bridge entirely.
   if (imageCache.get(key) !== undefined) {
     applyImageResult(img, key, src)
@@ -1080,13 +1093,22 @@ async function hydrateImage(img: HTMLImageElement) {
     fetchPromise = (async () => {
       try {
         const r: ImageDataLike = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
-        if (r.b64) {
+        if (gen !== imageGeneration) return // stale: never write the cache
+        // Android returns a token URL the WebView streams; desktop returns base64.
+        if (r.url) {
+          imageCache.set(key, r.url)
+        } else if (r.b64) {
           imageCache.set(key, `data:${r.mime};base64,${r.b64}`)
         } else {
           imageCache.set(key, '')
         }
-      } catch {
+      } catch (e) {
+        if (gen !== imageGeneration) return
         imageCache.set(key, '')
+        // Stable image tokens map to informational status hints (todo 13f);
+        // recovery is driven by the tree-grant flow, not by a retry action.
+        const hint = imageStatusHint(e instanceof Error ? e.message : String(e))
+        if (hint) status.value = hint
       }
     })()
     imageInFlight.set(key, fetchPromise)
@@ -1098,6 +1120,7 @@ async function hydrateImage(img: HTMLImageElement) {
     // must not clear it while the fetch is still delivering.
     if (imageInFlight.get(key) === fetchPromise) imageInFlight.delete(key)
   }
+  if (gen !== imageGeneration) return
   const url = imageCache.get(key) || ''
   if (!url) return // known-failed load; keep the placeholder
   applyImageResult(img, key, src)

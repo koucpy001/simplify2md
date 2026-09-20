@@ -21,6 +21,18 @@ import io.github.koucpy001.simplify2md.binding.ExternalUrlLauncher
 import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
+import io.github.koucpy001.simplify2md.image.AndroidChildDocumentUriBuilder
+import io.github.koucpy001.simplify2md.image.AndroidImageDocumentReader
+import io.github.koucpy001.simplify2md.image.AndroidTreeGrantPersistence
+import io.github.koucpy001.simplify2md.image.AndroidTreeLauncher
+import io.github.koucpy001.simplify2md.image.ImageBindings
+import io.github.koucpy001.simplify2md.image.ImageTreeStore
+import io.github.koucpy001.simplify2md.image.MediaTokenStore
+import io.github.koucpy001.simplify2md.image.RelativeImageResolver
+import io.github.koucpy001.simplify2md.image.RelativeImageTreeCoordinator
+import io.github.koucpy001.simplify2md.image.authorityOf
+import io.github.koucpy001.simplify2md.image.documentIdOf
+import io.github.koucpy001.simplify2md.image.treeDocumentIdOf
 import io.github.koucpy001.simplify2md.storage.AndroidBackupFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidConfigFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentContentReader
@@ -41,6 +53,7 @@ import io.github.koucpy001.simplify2md.storage.SaveBindings
 import io.github.koucpy001.simplify2md.storage.SaveStore
 import io.github.koucpy001.simplify2md.web.AssetPathMapper
 import io.github.koucpy001.simplify2md.web.AssetWebViewPathHandler
+import io.github.koucpy001.simplify2md.web.MediaWebViewPathHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -76,6 +89,16 @@ class MainActivity : Activity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var bridge: Bridge
     private lateinit var bindings: DesktopOnlyBindings
+
+    /**
+     * Token table for the `/media/<token>` streaming endpoint (todo 13e).
+     * Created before the asset loader so the path handler can be registered;
+     * cleared on destroy so no stale document URI outlives the session.
+     */
+    private lateinit var mediaTokens: MediaTokenStore
+
+    /** The tree picker for relative-image authorization (todo 13c). */
+    private lateinit var treeLauncher: AndroidTreeLauncher
 
     /**
      * App-private save IO (todo 11). Created before the WebView so startup
@@ -144,10 +167,18 @@ class MainActivity : Activity() {
         // onNewIntent dispatch are owned by todo 18.
         startupFileGate.record(intent?.dataString)
 
+        // Token table for the /media/<token> image endpoint; must exist before
+        // the asset loader so the path handler can be registered.
+        mediaTokens = MediaTokenStore()
+
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain(APP_ASSETS_DOMAIN)
             .addPathHandler("${AssetPathMapper.FRONTEND_ROUTE}/", AssetWebViewPathHandler(assets))
             .addPathHandler("${AssetPathMapper.ASSETS_ROUTE}/", AssetWebViewPathHandler(assets))
+            .addPathHandler(
+                "${MediaWebViewPathHandler.MEDIA_ROUTE}/",
+                MediaWebViewPathHandler(mediaTokens, contentResolver),
+            )
             .build()
 
         // A stable root container so later todos (IME insets in todo 17) can
@@ -229,7 +260,43 @@ class MainActivity : Activity() {
             files = AndroidConfigFileSystem(filesDir),
             releaser = AndroidUriGrantReleaser(contentResolver),
         )
-        SafBindings(safStore, AndroidDocumentContentReader(contentResolver), recents).registerOn(bridge)
+
+        // Relative-image resolution (todo 13): folder-tree grant + token endpoint.
+        // The tree picker is a separate launcher from the single SAF picker slot,
+        // and the (c) pending state machine is pure JVM behind these seams.
+        treeLauncher = AndroidTreeLauncher(this)
+        val treeStore = ImageTreeStore(
+            persistence = AndroidTreeGrantPersistence(contentResolver),
+            treeDocIdOf = ::treeDocumentIdOf,
+            authorityOf = ::authorityOf,
+            onSessionGrant = {
+                runOnUiThread {
+                    Toast.makeText(this, R.string.image_tree_session_grant, Toast.LENGTH_LONG).show()
+                }
+            },
+        )
+        val imageCoordinator = RelativeImageTreeCoordinator(treeStore, treeLauncher)
+        treeLauncher.setLateResultHandler { result -> imageCoordinator.onLauncherResult(result) }
+        val imageResolver = RelativeImageResolver(
+            treeStore = treeStore,
+            coordinator = imageCoordinator,
+            reader = AndroidImageDocumentReader(contentResolver),
+            tokens = mediaTokens,
+            documentIdOf = ::documentIdOf,
+            authorityOf = ::authorityOf,
+            buildChildUri = AndroidChildDocumentUriBuilder(),
+            endpointBase = "https://$APP_ASSETS_DOMAIN${MediaWebViewPathHandler.MEDIA_ROUTE}/",
+        )
+        ImageBindings(imageResolver).registerOn(bridge)
+
+        SafBindings(
+            safStore,
+            AndroidDocumentContentReader(contentResolver),
+            recents,
+            // A successful document load bumps the image generation and rejects
+            // the previous document's pending tree requests (plan todo 13, D5).
+            onDocumentLoaded = { uri -> imageCoordinator.onDocumentLoaded(uri) },
+        ).registerOn(bridge)
         RecentsBindings(recents).registerOn(bridge)
 
         // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
@@ -272,15 +339,18 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Routes the pre-registered SAF picker result back to [safLauncher]. This
+     * Routes the pre-registered SAF picker and tree-picker results. This
      * Activity uses no other request code, so nothing is forwarded to the
      * deprecated super implementation.
      */
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        // The reconciliation gate creates the picker only after the WebView
+        // The reconciliation gate creates the pickers only after the WebView
         // exists; a result arriving before that has no launcher to route to.
-        if (::safLauncher.isInitialized) {
-            safLauncher.onActivityResult(requestCode, resultCode, data)
+        if (::safLauncher.isInitialized && safLauncher.onActivityResult(requestCode, resultCode, data)) {
+            return
+        }
+        if (::treeLauncher.isInitialized && treeLauncher.onActivityResult(requestCode, resultCode, data)) {
+            return
         }
     }
 
@@ -297,6 +367,10 @@ class MainActivity : Activity() {
         }
         if (::bridge.isInitialized) {
             bridge.dispose()
+        }
+        // Drop every media token so no stale document URI outlives the session.
+        if (::mediaTokens.isInitialized) {
+            mediaTokens.clear()
         }
         super.onDestroy()
     }

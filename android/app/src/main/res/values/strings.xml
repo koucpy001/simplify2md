@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">simplify2md</string>
     <string name="saf_session_grant">该来源不支持持久授权，重启后需重新选择</string>
+    <string name="image_tree_session_grant">该文件夹不支持持久授权，重启后需重新授权</string>
 
     <!-- Startup save reconciliation (todo 11). Three choices only; the default
          item is preselected by length in ReconcileDecision. -->

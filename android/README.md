@@ -174,6 +174,42 @@ journal 保留，交给下次启动对账。
 默认项**只按长度**判定：仅当实际长度 ≥ `expectedLen` 时默认"保留当前内容"；实际长度 < `expectedLen`
 （疑似截断）时默认"用备份恢复"；目标缺失时默认"用备份恢复"。弹窗不可取消，未点选不会应用任何选择。
 
+## 相对图片解析（todo 13）
+
+Android 没有"文件所在目录"概念，相对图片（`![](images/foo.png)`）依赖用户对所在文件夹的
+**一次性树授权**（`ACTION_OPEN_DOCUMENT_TREE`）。`LoadImageForSrc(src, mdUri, imageRoot)`
+的判定矩阵（`image/ImageResolver.kt`，纯 JVM 可测）：
+
+| 分支 | 条件 | 行为 |
+|---|---|---|
+| (a) | `http(s):` / `data:` / `blob:` 绝对 URL | WebView 直接加载，不进桥 |
+| (b) | 相对路径 + 已授权树 | `DocumentsContract.buildDocumentUriUsingTree` 沿相对段构造子文档 URI，经本机 `/media/<token>` 端点流式返回 |
+| (c) | 相对路径 + 未授权树 | **挂起**等待一次树授权（每文档去重只弹一次）；授权成功 → 该文档所有待决图片一次性解析；取消 → 全部以 `image-tree-cancelled` 拒绝，本会话内不再重复弹窗 |
+| (d) | 树外（含 `../`）、系统禁止授权目录（存储根 / `Download/` / `Android/data` / `Android/obb`）、provider 不透明、无文档 URI（未标题 / `documentId` 不可解析）、front matter `imageRoot` 为 Windows 绝对路径 | 显式失败占位 + 状态栏提示，绝不显示空白图 |
+| (e) | 成功路径 | 返回 `{url, mime}`（token 端点），**不是 base64**；超过 **6MB** 走占位 |
+
+**关键限制（必须如实声明）**：分支 (b) 的树内相对解析**仅对"路径型 documentId"的 provider
+（本地 `ExternalStorageProvider`）有效**。云盘等 provider 的 documentId 是不透明句柄，
+对其追加路径段是猜测——**不得假装支持**，一律走 (d) 的"不支持"占位。
+
+**persisted-tree 关联规则**：启动时从 `contentResolver.persistedUriPermissions` 筛出树型授权，
+用 `DocumentsContract.getTreeDocumentId(treeUri)` 与 `DocumentsContract.getDocumentId(docUri)`
+取各自 documentId，按 `docId == treeDocId || docId.startsWith(treeDocId + "/")` 判定归属，
+多候选取**最长 treeDocId**。**禁止**用 `…/document/…` 与 `…/tree/…` 的裸 URI 前缀比较——
+文档 URI 不含 `/tree/` 段，裸前缀匹配在"先打开文件再显示图片"的常规路径上永远失败。
+
+**跨文档失效**：pending 队列与前端 `hydrateImage` 都带每文档 generation token；`applyLoaded`
+（文档切换）递增 generation 并丢弃上一 generation 的待决请求，迟到的旧结果不会按 lazy id +
+lazySrc 匹配到新文档节点（串图 / 缓存污染）。
+
+**树授权名额**：树授权同样 `takePersistableUriPermission`（try/catch 降级为会话级并提示），
+按 LRU 上限（≤8）管理，超限时释放最旧且**非当前激活**的树，避免触碰系统持久授权名额上限
+（旧版 128 / API 30+ 512）后抛 `SecurityException`。
+
+**失败令牌**（前端 `lib/image-token.ts` 映射为中文状态栏提示，`test-token-mapping.ts` 断言）：
+`image-not-in-tree` / `image-unsupported-provider` / `image-too-large` / `image-denied` /
+`image-tree-cancelled`。映射只做**信息性**提示，不含"重试"动作——恢复由 (c) 的挂起/恢复流程驱动。
+
 ## 限制与设备项
 
 - `[device]`：连续两次从文件管理器打开不同 `.md`，必须路由到**同一实例**
@@ -184,6 +220,8 @@ journal 保留，交给下次启动对账。
   无模拟器无法执行（**DEVICE-DEFERRED**）。
 - `[device]`（todo 12）：最近文件下拉显示正确文件名（而非 `content://` 原文）且可重开；把已记录的文档在外部删除后再重开 →
   该条目被自动移除且不崩溃。JVM 单测只覆盖模型/释放/命名，端到端 UI 需真机（**DEVICE-DEFERRED**）。
+- `[device]`（todo 13）：本地存储含 `images/` 子目录的文档经 (b) 正常显示；从 `Download/` 打开给出提示而非白图；
+  云盘来源文档给出"不支持"占位而非空白。无模拟器无法执行（**DEVICE-DEFERRED**）。
 - 桌面 `README.md:18` 的文件级承诺仅适用于 Windows；Android 的保存语义见上方"保存的可靠性"。
 
 ## 编码语义（todo 9，与桌面的两处差异）
