@@ -103,13 +103,60 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew \
 ./gradlew --stop
 ```
 
+## 保存的可靠性（todo 11）
+
+Android 的 SAF 文档 URI **无法**做"临时文件 + rename 覆盖"，因此桌面 `README.md:18` 的文件级
+承诺仅适用于 Windows；**Android 不提供原子替换**，只提供"写入失败回滚 + 启动对账恢复
+（状态机 + 全量哈希）"。两者是不同的可靠性模型，不得混称。
+
+保存流程（`storage/SaveStore.kt`）：
+
+1. 先在内存完成全部编码与换行转换（`encoding/Encoding.kt`）；
+2. 从目标 URI 读出**当前磁盘字节**（不是编辑器内存内容），复制到 `filesDir/backup/<hash>.bak`
+   （`<hash> = SHA-256(目标 URI 字符串)`；用 `filesDir` 而**非** `cacheDir`，后者可能被系统回收）；
+3. 写 journal `filesDir/backup/<hash>.json`（状态 `writing`、`expectedLen`、**全量** `expectedSha256`；
+   不使用部分/三段校验）；
+4. 通过 `ContentResolver.openFileDescriptor(uri, "wt")` 写入，`flush()` 后 `FileDescriptor.sync()`
+   （best-effort）；回退到 `"w"` 时必须显式 `FileChannel.truncate(encoded.size)`（`"w"` 不保证截断，
+   短写会残留旧尾部）；
+5. 立即回读目标并计算实际哈希/长度，把 journal **原子改写**为状态 `written`（记 observed hash/len），
+   再删除备份与 journal。
+
+备份或 journal 写入失败 → 保存**直接中止**，绝不触及目标。写入/回读/长度异常 → 用备份回写并向 UI
+报错（绝不静默）；回读本身抛错同样视为写失败。`writing` 与 `written` 是**两个不同状态**：写入失败时
+journal 保留，交给下次启动对账。
+
+启动对账（`storage/ReconcileEngine.kt`，在创建 WebView **之前**执行）：
+
+| journal 状态 | 目标校验 | 行为 |
+|---|---|---|
+| `written` | — | 判定完成，静默清理 journal 与备份 |
+| `writing` | 全量哈希一致 | 判定完成，静默清理 |
+| `writing` | 缺失 / 长度或哈希不一致 | **原生 `AlertDialog` 三选一**，绝不自动覆盖或回滚 |
+| 任意 | 指纹不可得 | 不删除备份，提示用户 |
+| 无法解析 | — | 不删除备份；journal 重命名为 `.corrupt` 并提示 |
+| 无对应 journal 的 `.bak` | — | 孤儿备份，记录并提示，不自动删除 |
+
+三选一与默认项（决策逻辑为纯函数 `ReconcileDecision`，JVM 单测覆盖）：
+
+| 选项 | 语义 |
+|---|---|
+| 保留当前内容 | 保持目标现状，删除 journal 与备份 |
+| 用备份恢复 | 用备份回写目标（回写后再校验一次） |
+| 两者都保留 | 保持目标现状，把备份改名为 `<hash>.kept` |
+
+默认项**只按长度**判定：仅当实际长度 ≥ `expectedLen` 时默认"保留当前内容"；实际长度 < `expectedLen`
+（疑似截断）时默认"用备份恢复"；目标缺失时默认"用备份恢复"。弹窗不可取消，未点选不会应用任何选择。
+
 ## 限制与设备项
 
 - `[device]`：连续两次从文件管理器打开不同 `.md`，必须路由到**同一实例**
   （`launchMode="singleTask"` + `onNewIntent`）。无模拟器的 CI 无法执行，由 **todos 7/18** 在真机验证。
 - `[device]`（todo 8）：预览里点击外部链接会打开系统浏览器；打开文件 / 外部修改时页面能收到上表事件。
   无模拟器的 CI 只能验证到"处理器已注册 + 名称逐字一致 + 纯逻辑单测"，**不得**用"代码看起来对"冒充真机通过。
-- 桌面 `README.md:18` 的"原子替换"承诺仅适用于 Windows；Android 的保存语义见 todo 11。
+- `[device]`（todo 11）：保存过程中强杀 → 重启出现原生三选一恢复弹窗，且默认项与长度判定一致。
+  无模拟器无法执行（**DEVICE-DEFERRED**）。
+- 桌面 `README.md:18` 的文件级承诺仅适用于 Windows；Android 的保存语义见上方"保存的可靠性"。
 
 ## 编码语义（todo 9，与桌面的两处差异）
 

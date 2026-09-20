@@ -2,4 +2,18 @@
 <resources>
     <string name="app_name">simplify2md</string>
     <string name="saf_session_grant">该来源不支持持久授权，重启后需重新选择</string>
+
+    <!-- Startup save reconciliation (todo 11). Three choices only; the default
+         item is preselected by length in ReconcileDecision. -->
+    <string name="save_recovery_title">未完成的保存</string>
+    <string name="save_recovery_message">上次保存 %1$s 时未正常结束。请选择如何处理当前文件与备份：</string>
+    <string name="save_recovery_keep_current">保留当前内容</string>
+    <string name="save_recovery_restore_backup">用备份恢复</string>
+    <string name="save_recovery_keep_both">两者都保留</string>
+    <string name="save_recovery_confirm">按此处理</string>
+
+    <string name="save_corrupt_journal">保存日志损坏，已保留备份供手动恢复</string>
+    <string name="save_orphan_backup">发现无对应记录的备份，已保留</string>
+    <string name="save_fingerprint_unavailable">无法读取文件完成对账，备份已保留</string>
+    <string name="save_recovery_failed">恢复操作失败，备份已保留</string>
 </resources>

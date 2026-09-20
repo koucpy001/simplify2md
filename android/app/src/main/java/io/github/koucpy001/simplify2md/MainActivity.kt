@@ -21,14 +21,27 @@ import io.github.koucpy001.simplify2md.binding.ExternalUrlLauncher
 import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
+import io.github.koucpy001.simplify2md.storage.AndroidBackupFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentContentReader
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentMetadataReader
+import io.github.koucpy001.simplify2md.storage.AndroidRecoveryPrompt
 import io.github.koucpy001.simplify2md.storage.AndroidSafLauncher
+import io.github.koucpy001.simplify2md.storage.AndroidSaveDocumentIo
 import io.github.koucpy001.simplify2md.storage.AndroidUriPermissionStore
+import io.github.koucpy001.simplify2md.storage.ReconcileCoordinator
+import io.github.koucpy001.simplify2md.storage.ReconcileEngine
+import io.github.koucpy001.simplify2md.storage.ReconcileNotice
 import io.github.koucpy001.simplify2md.storage.SafBindings
 import io.github.koucpy001.simplify2md.storage.SafStore
+import io.github.koucpy001.simplify2md.storage.SaveBindings
+import io.github.koucpy001.simplify2md.storage.SaveStore
 import io.github.koucpy001.simplify2md.web.AssetPathMapper
 import io.github.koucpy001.simplify2md.web.AssetWebViewPathHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * Must stay https: `crypto.subtle` is only exposed in a secure context, and the
@@ -59,6 +72,16 @@ class MainActivity : Activity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var bridge: Bridge
     private lateinit var bindings: DesktopOnlyBindings
+
+    /**
+     * App-private save IO (todo 11). Created before the WebView so startup
+     * reconciliation can run first; the same instances back `SaveFile`.
+     */
+    private lateinit var backupFs: AndroidBackupFileSystem
+    private lateinit var saveIo: AndroidSaveDocumentIo
+
+    /** Drives the pre-WebView reconciliation gate; cancelled with the Activity. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /**
      * Pre-registered SAF picker (plan todo 10). Its fixed request code is routed
@@ -123,6 +146,42 @@ class MainActivity : Activity() {
             .addPathHandler("${AssetPathMapper.ASSETS_ROUTE}/", AssetWebViewPathHandler(assets))
             .build()
 
+        // A stable root container so later todos (IME insets in todo 17) can
+        // attach an OnApplyWindowInsetsListener without touching the WebView.
+        val root = FrameLayout(this)
+        setContentView(root)
+
+        if (BuildConfig.DEBUG) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+
+        // Save IO is independent of the WebView so reconciliation can run first.
+        backupFs = AndroidBackupFileSystem(filesDir)
+        saveIo = AndroidSaveDocumentIo(contentResolver)
+
+        // Reconciliation must finish BEFORE the WebView is created (plan todo 11j):
+        // the user's recovery choice has to be applied before any file can load,
+        // and the three-choice dialog is native Kotlin (no JS event, no bridge
+        // function). This is an async gate — the WebView is created from the
+        // coroutine callback, never by blocking the main thread. `ContentResolver`
+        // is already available here.
+        scope.launch {
+            ReconcileCoordinator(
+                engine = ReconcileEngine(backupFs, saveIo, saveIo),
+                prompt = AndroidRecoveryPrompt(this@MainActivity),
+                onNotice = { notice -> runOnUiThread { showReconcileNotice(notice) } },
+            ).run()
+            setupWebView(root)
+        }
+    }
+
+    /**
+     * Creates and wires the WebView. Called only after startup reconciliation
+     * has settled, so any recovery decision is already applied.
+     */
+    private fun setupWebView(root: FrameLayout) {
+        if (isFinishing || isDestroyed) return
+
         webView = createWebView()
 
         bridge = Bridge(webView)
@@ -161,9 +220,9 @@ class MainActivity : Activity() {
         )
         SafBindings(safStore, AndroidDocumentContentReader(contentResolver)).registerOn(bridge)
 
-        // A stable root container so later todos (IME insets in todo 17) can
-        // attach an OnApplyWindowInsetsListener without touching the WebView.
-        val root = FrameLayout(this)
+        // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
+        SaveBindings(SaveStore(backupFs, saveIo, saveIo)).registerOn(bridge)
+
         root.addView(
             webView,
             FrameLayout.LayoutParams(
@@ -171,13 +230,19 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
-        setContentView(root)
-
-        if (BuildConfig.DEBUG) {
-            WebView.setWebContentsDebuggingEnabled(true)
-        }
 
         webView.loadUrl(START_URL)
+    }
+
+    /** Surfaces a pre-WebView reconciliation notice as a native status toast. */
+    private fun showReconcileNotice(notice: ReconcileNotice) {
+        val messageRes = when (notice) {
+            ReconcileNotice.CORRUPT_JOURNAL -> R.string.save_corrupt_journal
+            ReconcileNotice.ORPHAN_BACKUP -> R.string.save_orphan_backup
+            ReconcileNotice.FINGERPRINT_UNAVAILABLE -> R.string.save_fingerprint_unavailable
+            ReconcileNotice.APPLY_FAILED -> R.string.save_recovery_failed
+        }
+        Toast.makeText(this, messageRes, Toast.LENGTH_LONG).show()
     }
 
     private fun createWebView(): WebView = WebView(this).apply {
@@ -200,14 +265,27 @@ class MainActivity : Activity() {
      * deprecated super implementation.
      */
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        safLauncher.onActivityResult(requestCode, resultCode, data)
+        // The reconciliation gate creates the picker only after the WebView
+        // exists; a result arriving before that has no launcher to route to.
+        if (::safLauncher.isInitialized) {
+            safLauncher.onActivityResult(requestCode, resultCode, data)
+        }
     }
 
     override fun onDestroy() {
-        bridge.onActivityDestroying()
-        (webView.parent as? ViewGroup)?.removeView(webView)
-        webView.destroy()
-        bridge.dispose()
+        // Stop the reconciliation coroutine: destroying the Activity must not
+        // leave a dialog or IO continuation alive.
+        scope.cancel()
+        if (::bridge.isInitialized) {
+            bridge.onActivityDestroying()
+        }
+        if (::webView.isInitialized) {
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.destroy()
+        }
+        if (::bridge.isInitialized) {
+            bridge.dispose()
+        }
         super.onDestroy()
     }
 
