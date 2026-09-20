@@ -1,6 +1,8 @@
 <script lang="ts" setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { renderMarkdown, extractImageRoot, extractOutline } from './lib/markdown'
+import { resolveRelativeMdLink } from './lib/rel-link'
+import { probeDomEnvironment } from './lib/web-env'
 import type { OutlineItem } from './lib/markdown'
 import {
   OpenFile,
@@ -33,7 +35,7 @@ import { LruCache } from './lib/lru'
 import { remedyForToken, saveAsUtf8 } from './lib/encoding-token'
 import { imageStatusHint } from './lib/image-token'
 import { saveAction } from './lib/save-policy'
-import { baseName, dirOf, selectDisplayName } from './lib/paths'
+import { baseName, selectDisplayName } from './lib/paths'
 import { decideDraftTarget, draftFilePath } from './lib/draft-binding'
 import {
   registerBridgeEvents,
@@ -819,16 +821,24 @@ function onPreviewClick(e: MouseEvent) {
     const pre = btn.closest('pre')
     const code = pre?.querySelector('code')
     if (code) {
-      navigator.clipboard
-        .writeText(code.textContent || '')
-        .then(() => {
-          btn.textContent = '已复制'
-          setTimeout(() => { btn.textContent = '复制' }, 1500)
-        })
-        .catch(() => {
-          btn.textContent = '复制失败'
-          setTimeout(() => { btn.textContent = '复制' }, 1500)
-        })
+      // Plan todo 20(a): navigator.clipboard is the ONLY clipboard path — no
+      // bridge fallback (the 20-symbol export set is frozen). A missing API or
+      // a denied permission must surface "复制失败", never throw or fall back.
+      try {
+        navigator.clipboard
+          .writeText(code.textContent || '')
+          .then(() => {
+            btn.textContent = '已复制'
+            setTimeout(() => { btn.textContent = '复制' }, 1500)
+          })
+          .catch(() => {
+            btn.textContent = '复制失败'
+            setTimeout(() => { btn.textContent = '复制' }, 1500)
+          })
+      } catch {
+        btn.textContent = '复制失败'
+        setTimeout(() => { btn.textContent = '复制' }, 1500)
+      }
     }
     return
   }
@@ -866,14 +876,26 @@ function onPreviewClick(e: MouseEvent) {
   if (/\.md(?:ark)?\b/i.test(href) && filePath.value) {
     // Relative links may carry a #fragment and URL-encoded chars; strip the
     // fragment and decode so `子目录/文件%20名.md#节` resolves on disk.
-    const raw = href.split('#')[0]
+    const raw = href.split('#')[0].split('?')[0]
     let rel = raw
     try { rel = decodeURIComponent(raw) } catch { /* keep raw */ }
-    const base = dirOf(filePath.value)
-    const abs = /^[a-zA-Z]:[\\/]/.test(rel)
-      ? rel
-      : base ? base + '/' + rel : rel
-    requestSwitch(() => { void loadPath(abs) })
+    // Plan todo 20(c): explicit resolution. Desktop keeps directory joining;
+    // Android constructs the child document URI the same way todo 13 builds
+    // relative-image URIs (tree-formed buildDocumentUriUsingTree shape), and
+    // answers with a status-bar prompt when the target is outside a granted
+    // tree — never silently doing nothing.
+    const resolution = resolveRelativeMdLink(rel, filePath.value)
+    if (resolution.action === 'prompt') {
+      status.value = resolution.message
+      return
+    }
+    requestSwitch(() => {
+      void loadPath(resolution.target).then((ok) => {
+        // A rejected open (e.g. the provider refuses the constructed URI)
+        // must still guide the user instead of leaving only a raw error.
+        if (!ok) status.value = '相对链接打开失败：' + resolution.target
+      })
+    })
   }
 }
 
@@ -1381,6 +1403,11 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  // Plan todo 20(b): verify DOM storage / secure context up front. A degraded
+  // environment (no localStorage, isSecureContext=false) must produce a VISIBLE
+  // status-bar prompt, never a silent loss of preferences.
+  const envProblem = probeDomEnvironment(window)
+  if (envProblem) status.value = envProblem
   window.addEventListener('keydown', onKeydown)
   if (editorHost.value) {
     editorView = createMarkdownEditor(editorHost.value, source.value, theme.value === 'dark', (t) => {
