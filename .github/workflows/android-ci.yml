@@ -1,0 +1,188 @@
+name: Android CI
+
+# Branch and pull-request builds only. Tag pushes are owned by release.yml
+# (plan todo 22), which is the single publisher of GitHub Releases; `tags-ignore`
+# is only legal under `push` — placing it under `pull_request` would make this
+# workflow file invalid.
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**']
+  pull_request: {}
+
+# Read-only: this workflow never touches releases or repository contents.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unsigned release APK (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    # Contract: this job invokes only ./gradlew targets. The frontend build and
+    # the staging of mdview/frontend/dist into the APK assets are owned by the
+    # Gradle task added in plan todo 3 and are therefore never duplicated here;
+    # the Windows/desktop gates stay exclusively in ci.yml.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # Restores ~/.gradle/caches + ~/.gradle/wrapper only, keyed on the
+          # Android build files. Daemon/log/output directories are never cached,
+          # so no stale local state can leak into the build.
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      # npm must be on PATH: the Gradle asset-staging task added in plan todo 3
+      # runs `npm ci && npm run build -- --mode android` itself, so this workflow
+      # deliberately has no separate frontend-build step of its own.
+      - name: Set up Node.js (for the Gradle frontend-staging task)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mdview/frontend/package-lock.json
+
+      # Installs the SDK command-line tools (sdkmanager) and adds them to PATH.
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Export ANDROID_HOME / ANDROID_SDK_ROOT
+        shell: bash
+        run: |
+          set -euo pipefail
+          # setup-android installs into $ANDROID_SDK_ROOT (fallback ~/.android/sdk)
+          # and does not export it itself; normalise both names to one root for
+          # Gradle and sdkmanager.
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          test -d "$SDK_ROOT"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "Android SDK root: $SDK_ROOT"
+
+      - name: Install SDK platform 36 + build-tools 36.0.0 (accept licenses)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `yes` feeds the interactive prompts; sdkmanager exits first and closes
+          # the pipe, so `yes` may die with SIGPIPE — pipefail must be off here.
+          set +o pipefail
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null
+          set -o pipefail
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+          # Hard gate: fail if either package is not actually installed.
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --list_installed \
+            | grep -E 'platforms;android-36|build-tools;36\.0\.0'
+
+      # The wrapper's exec bit can be lost when it is committed from a platform
+      # without POSIX file modes (this repo is primarily developed on Windows).
+      - name: Make Gradle wrapper executable
+        working-directory: android
+        run: chmod +x ./gradlew
+
+      # Pure-JVM tests, no emulator and no Robolectric (plan todo 9).
+      - name: JVM unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Android lint
+        working-directory: android
+        run: ./gradlew :app:lintDebug
+
+      # Branch/PR runs have no release credentials by design (todo 21 owns the
+      # credential switch), so the output stays unsigned here.
+      - name: Assemble release APK (unsigned on branch builds)
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::warning::branch/PR builds are unsigned: release credentials are not available here (plan todo 21 owns the release credential switch)."
+          ./gradlew :app:assembleRelease
+
+      # The Gradle task from todo 3 stages the dist built with `--mode android`;
+      # only that build mode bundles the Android @bridge shim defining
+      # __bridgeCall (the desktop build exposes window.go/window.runtime instead).
+      - name: Assert the packaged frontend is the Android bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)
+          if [ -z "$APK" ]; then
+            echo "::error::no APK found under android/app/build/outputs/apk/release"
+            exit 1
+          fi
+          echo "APK: $APK"
+          unzip -Z1 "$APK" > /tmp/apk-entries.txt
+          if ! grep -q '^assets/frontend/index.html$' /tmp/apk-entries.txt; then
+            echo "::error::APK is missing assets/frontend/index.html — the built frontend was not staged into the APK"
+            exit 1
+          fi
+          echo "OK: assets/frontend/index.html is packaged"
+          if ! unzip -p "$APK" 'assets/frontend/assets/*.js' > /tmp/frontend-bundle.js; then
+            echo "::error::APK has no assets/frontend/assets/*.js entries"
+            exit 1
+          fi
+          if ! grep -q '__bridgeCall' /tmp/frontend-bundle.js; then
+            echo "::error::packaged JS has no __bridgeCall marker — the APK was not staged from a --mode android frontend build"
+            exit 1
+          fi
+          echo "OK: packaged JS contains the Android bridge marker __bridgeCall"
+
+      # Wave 1 records the size and composition only; the hard budget gate is
+      # plan todo 21, once the user confirms a threshold (Success criteria 5).
+      # This step must never fail on size.
+      - name: Record APK size and composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$APK"
+          BYTES=$(stat -c%s "$APK")
+          MIB=$(awk -v b="$BYTES" 'BEGIN { printf "%.2f", b / 1048576 }')
+          echo "APK path : $APK"
+          echo "APK bytes: $BYTES (${MIB} MiB)"
+          sha256sum "$APK"
+          unzip -l "$APK" > /tmp/apk-contents.txt
+          # awk reads the whole stream (no early exit), so pipefail cannot trip.
+          echo "Largest entries by uncompressed size:"
+          sort -rn -k1 /tmp/apk-contents.txt | awk 'NR<=25'
+          {
+            echo "### Android APK size (Wave 1: recorded, not gated)"
+            echo ""
+            echo "- artifact: \`$APK\`"
+            echo "- bytes: **$BYTES** (${MIB} MiB)"
+            echo "- sha256: \`$(sha256sum "$APK" | awk '{print $1}')\`"
+            echo ""
+            echo "**Largest entries (uncompressed bytes)**"
+            echo '```'
+            sort -rn -k1 /tmp/apk-contents.txt | awk 'NR<=25'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-unsigned-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # Runs even when an earlier gate failed, so lint findings stay inspectable.
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report
+          path: android/app/build/reports/lint-results-debug.*
+          if-no-files-found: warn

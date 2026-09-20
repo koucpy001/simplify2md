@@ -1,0 +1,31 @@
+# Pinned Gradle version catalog. Every toolchain version is an EXACT string —
+# never a range ("8.x") — so the same AGP/Gradle/Kotlin/webkit set is used in CI.
+#
+# Chosen combination (supports compileSdk 36):
+#   Gradle 9.1.0   — wrapper distribution; AGP 8.13.x supports Gradle 8.13 .. 9.x
+#                    (AGP 9.0 requires Gradle >= 9.1.0; AGP 8.x is unsupported on Gradle >= 9.6).
+#   AGP 8.13.1     — last 8.x line; max supported compileSdk = API 36.1; min Gradle 8.13; JDK 17+.
+#   Kotlin 2.2.20  — KGP compatible with Gradle 9.1 (KGP 2.2.0 / older failed with
+#                    NoSuchMethodError on Gradle 9.1); Gradle 9.1 embeds Kotlin 2.2.
+#   AndroidX WebKit 1.17.0 — latest stable, required by the WebViewAssetLoader host (todo 2).
+[versions]
+agp = "8.13.1"
+kotlin = "2.2.20"
+androidxWebkit = "1.17.0"
+coroutines = "1.10.2"
+junit = "4.13.2"
+orgJson = "20240303"
+
+[libraries]
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "androidxWebkit" }
+# Supplies Dispatchers.IO / Dispatchers.Main for the bridge threading contract
+# (IO/network off the JavaBridge thread, evaluateJavascript on the main thread).
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+# testImplementation-only: android.jar's org.json throws in JVM unit tests, so the
+# bridge codec needs a real org.json on the test classpath. Never packaged in the APK.
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

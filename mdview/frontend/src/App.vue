@@ -20,8 +20,12 @@ import {
   ListDrafts,
   ClearDraft,
   ClearRecents,
-} from '../wailsjs/go/main/App'
-import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime'
+  EventsOn,
+  BrowserOpenURL,
+  type ImageDataLike,
+  type OpenResultLike,
+  type RecentEntryLike,
+} from '@bridge'
 import { EditorView } from '@codemirror/view'
 import { createMarkdownEditor, setEditorHighlight, replaceEditorDoc } from './lib/cm-editor'
 import { LruCache } from './lib/lru'
@@ -34,7 +38,7 @@ const previewHtml = ref('')
 const imageRoot = ref<string | null>(null)
 const status = ref('')
 const dirty = ref(false)
-const recents = ref<string[]>([])
+const recents = ref<RecentEntryLike[]>([])
 const previewEl = ref<HTMLElement | null>(null)
 const editorHost = ref<HTMLElement | null>(null)
 let editorView: EditorView | null = null
@@ -136,8 +140,8 @@ async function recoverLatestDraft() {
 // recents list; untitled has the literal key.
 async function draftDisplayName(key: string): Promise<string> {
   if (key === 'untitled') return '无标题'
-  for (const p of recents.value) {
-    if ((await sha1Hex(p)) === key) return baseName(p)
+  for (const entry of recents.value) {
+    if ((await sha1Hex(entry.id)) === key) return entry.name
   }
   return '未知文档'
 }
@@ -501,7 +505,7 @@ function abandonDraftFor(path: string) {
     .catch(() => {})
 }
 
-function applyLoaded(r: { path: string; content: string; encoding?: string; newline?: string }) {
+function applyLoaded(r: OpenResultLike) {
   loadingFile = true
   filePath.value = r.path
   // Feed the doc through the editor so its DOM/undo state stays authoritative;
@@ -991,7 +995,7 @@ async function hydrateImage(img: HTMLImageElement) {
   } else {
     fetchPromise = (async () => {
       try {
-        const r = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
+        const r: ImageDataLike = await LoadImageForSrc(src, filePath.value, imageRoot.value || '')
         if (r.b64) {
           imageCache.set(key, `data:${r.mime};base64,${r.b64}`)
         } else {
@@ -1268,10 +1272,10 @@ onMounted(async () => {
   // drop it from the list instead of failing on every launch.
   if (recents.value.length > 0) {
     const first = recents.value[0]
-    if (!(await loadPath(first))) {
-      await RemoveRecent(first)
-      recents.value = recents.value.filter((p) => p !== first)
-      status.value = `上次打开的文件已失效：${baseName(first)}`
+    if (!(await loadPath(first.id))) {
+      await RemoveRecent(first.id)
+      recents.value = recents.value.filter((entry) => entry.id !== first.id)
+      status.value = `上次打开的文件已失效：${first.name}`
     }
   }
   // Startup path B: normal launch (restored recents or empty state).
@@ -1314,7 +1318,7 @@ onBeforeUnmount(() => {
       </button>
       <select v-if="recents.length" class="recents" @change="onRecentChange">
         <option disabled selected>最近文件</option>
-        <option v-for="p in recents" :key="p" :value="p">{{ baseName(p) }}</option>
+        <option v-for="entry in recents" :key="entry.id" :value="entry.id">{{ entry.name }}</option>
         <option value="__clear__">清空记录</option>
       </select>
       <span class="enc">{{ fileEnc }}</span>

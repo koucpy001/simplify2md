@@ -1,0 +1,18 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local SDK path (never committed; CI uses ANDROID_HOME)
+local.properties
+
+# Native build output
+.externalNativeBuild/
+.cxx/
+
+# Staged frontend assets (populated by the Gradle task added in todo 3)
+app/src/main/assets/frontend/
+
+# IDE
+.idea/
+*.iml

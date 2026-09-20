@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive launcher icon foreground: a white document with blue text lines.
+  Content is kept inside the 72x72 safe zone centered in the 108x108 viewport.
+  The same artwork is rasterized into the legacy mipmap PNGs.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,28 L70,28 A5,5 0 0 1 75,33 L75,75 A5,5 0 0 1 70,80 L38,80 A5,5 0 0 1 33,75 L33,33 A5,5 0 0 1 38,28 Z" />
+    <path
+        android:fillColor="#2F6FEB"
+        android:pathData="M41,40 L67,40 L67,45 L41,45 Z" />
+    <path
+        android:fillColor="#2F6FEB"
+        android:pathData="M41,50 L67,50 L67,55 L41,55 Z" />
+    <path
+        android:fillColor="#2F6FEB"
+        android:pathData="M41,60 L57,60 L57,65 L41,65 Z" />
+</vector>

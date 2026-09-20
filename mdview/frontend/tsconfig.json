@@ -4,6 +4,12 @@
     "useDefineForClassFields": true,
     "module": "ESNext",
     "moduleResolution": "Node",
+    "baseUrl": ".",
+    "paths": {
+      "@bridge": [
+        "src/lib/bridge.wails.ts"
+      ]
+    },
     "strict": true,
     "jsx": "preserve",
     "sourceMap": true,

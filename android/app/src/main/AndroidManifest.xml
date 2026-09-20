@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  simplify2md Android host manifest (todo 2 of the android-apk-port plan).
+
+  Permission surface is intentionally minimal: INTERNET is used only by the
+  update check (todo 15). No storage, no install, no all-files access — file
+  access goes exclusively through SAF (todos 10/13).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:enableOnBackInvokedCallback="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Simplify2Md"
+        tools:targetApi="33">
+
+        <!--
+          Single thin WebView host. launchMode=singleTask so opening a file from
+          a file manager reuses the running instance (todo 18 owns onNewIntent
+          routing). configChanges keeps unsaved edits alive across rotation,
+          font-scale, locale and density changes. windowSoftInputMode is
+          adjustNothing; IME insets are consumed in code in todo 17.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|fontScale|locale|density"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustNothing">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              VIEW / EDIT for markdown-capable documents delivered as content://
+              or file:// URIs. Multiple <data> elements accumulate: schemes are
+              OR-ed together, MIME types are OR-ed together.
+              ACTION_EDIT is treated exactly like ACTION_VIEW (todo 7/18).
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/x-markdown" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!--
+              file:// fallback for pickers that hand over a path with no reliable
+              MIME type. pathPattern is ignored on API 31+ (deprecated) but still
+              honored on API 24-30; it is kept as a best-effort fallback only.
+              \. is a literal dot in Android's SIMPLE_GLOB pattern syntax.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\.md" />
+            </intent-filter>
+
+            <!--
+              ACTION_SEND semantics (owned by todo 7/18):
+                * EXTRA_STREAM (URI)  -> open the referenced file;
+                * EXTRA_TEXT (String) -> open an unnamed document containing the
+                  text; it must never be silently dropped.
+              Both text/* and */* are declared so senders advertising either type
+              are matched.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
