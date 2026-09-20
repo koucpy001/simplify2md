@@ -31,6 +31,8 @@ import { createMarkdownEditor, setEditorHighlight, replaceEditorDoc } from './li
 import { LruCache } from './lib/lru'
 import { remedyForToken, saveAsUtf8 } from './lib/encoding-token'
 import { saveAction } from './lib/save-policy'
+import { baseName, dirOf, selectDisplayName } from './lib/paths'
+import { decideDraftTarget, draftFilePath } from './lib/draft-binding'
 
 const source = ref('')
 const filePath = ref('')
@@ -153,16 +155,30 @@ async function draftDisplayName(key: string): Promise<string> {
   return '未知文档'
 }
 
-function confirmRecoverDraft() {
+async function confirmRecoverDraft() {
   const info = draftRecoverInfo.value
   draftRecoverVisible.value = false
   if (!info) return
+  // Bind the draft to the currently loaded document, or make it untitled.
+  // sha1(uri) is irreversible, so the only safe test is key equality against
+  // the open document. An unbound draft clears filePath: otherwise it would
+  // inherit the startup-restored recents[0] and saving would overwrite that
+  // file with the draft's content (review M2/D4 data-loss guard).
+  const target = decideDraftTarget({
+    draftKey: info.key,
+    currentDraftKey: await draftKey(filePath.value),
+    currentFilePath: filePath.value,
+  })
   loadingFile = true
+  filePath.value = draftFilePath(target)
+  if (target.kind === 'untitled') {
+    currentName.value = ''
+    readonly.value = false
+  }
   if (editorView) replaceEditorDoc(editorView, info.content)
   if (source.value !== info.content) source.value = info.content
-  // File open → overwrite current content; not open → becomes the untitled
-  // doc (filePath stays ''). Either way the recovered edits stay dirty so a
-  // follow-up autosave re-persists them under the current key.
+  // The recovered edits stay dirty so a follow-up autosave re-persists them
+  // under the bound key (or 'untitled').
   markDirty()
   imageRoot.value = extractImageRoot(info.content)
   imageCache.clear()
@@ -392,13 +408,14 @@ function markCurrentHit() {
   marks[idx]?.scrollIntoView({ block: 'center' })
 }
 
-// ---- base name / title / dirty ----
-function baseName(p: string): string {
-  return p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p
-}
+// ---- display name / title / dirty ----
+// The one name every UI surface uses: provider DISPLAY_NAME (Android) or path
+// basename (desktop), with the untitled fallback. Named so the toolbar, saveAs,
+// the status bar and the file-changed dialog can never drift apart.
+const displayPath = computed(() => selectDisplayName(currentName.value, filePath.value))
 
 function updateTitle() {
-  const name = filePath.value ? baseName(filePath.value) : '无标题'
+  const name = currentName.value || (filePath.value ? baseName(filePath.value) : '无标题')
   // Dirty marker goes BEFORE the filename: OS title bars truncate long titles
   // at the end, so a trailing `*` disappears exactly when names are longest.
   SetTitle(`simplify2md — ${dirty.value ? '● ' : ''}${name}`).catch(() => {})
@@ -614,7 +631,7 @@ async function save() {
 // "保存并退出"对无标题文档是死路（无处可写，退出弹窗关不掉）。
 async function saveAs() {
   try {
-    const p = await PickSavePath(filePath.value ? baseName(filePath.value) : '未标题.md')
+    const p = await PickSavePath(displayPath.value)
     if (!p) return
     await SaveFile(p, source.value, fileEnc.value, fileNewline.value)
     await finalizeSaveAs(p)
@@ -669,7 +686,7 @@ async function runSaveAsUtf8Remedy() {
       pickSavePath: (name) => PickSavePath(name),
       saveFile: (p, c, enc, nl) => SaveFile(p, c, enc, nl),
     },
-    filePath.value ? baseName(filePath.value) : '未标题.md',
+    displayPath.value,
     source.value,
     fileNewline.value,
   )
@@ -800,10 +817,10 @@ function onPreviewClick(e: MouseEvent) {
     const raw = href.split('#')[0]
     let rel = raw
     try { rel = decodeURIComponent(raw) } catch { /* keep raw */ }
-    const base = filePath.value.replace(/[\\/][^\\/]*$/, '')
+    const base = dirOf(filePath.value)
     const abs = /^[a-zA-Z]:[\\/]/.test(rel)
       ? rel
-      : base + '\\' + rel.replace(/\//g, '\\')
+      : base ? base + '/' + rel : rel
     requestSwitch(() => { void loadPath(abs) })
   }
 }
@@ -1327,7 +1344,8 @@ onMounted(async () => {
   const startupFile = await GetStartupFile().catch(() => '')
   if (startupFile) {
     if (!(await loadPath(startupFile))) {
-      status.value = `无法打开：${baseName(startupFile)}`
+      const known = recents.value.find((entry) => entry.id === startupFile)
+      status.value = `无法打开：${known ? known.name : baseName(startupFile)}`
     }
     // Startup path A: file-association launch returns early here, so the
     // update check + draft recovery must be invoked BEFORE the return
@@ -1389,7 +1407,7 @@ onBeforeUnmount(() => {
         <option value="__clear__">清空记录</option>
       </select>
       <span class="enc">{{ fileEnc }}</span>
-      <span class="path"><span v-if="dirty" class="dirty-dot">● </span>{{ filePath }}</span>
+      <span class="path"><span v-if="dirty" class="dirty-dot">● </span>{{ displayPath }}</span>
       <span class="stats">{{ stats.words }} 字 · {{ stats.chars }} 字符</span>
       <span class="status">{{ status }}</span>
       <!-- Reading progress: hidden in edit mode (no preview scrolling there). -->
@@ -1456,7 +1474,7 @@ onBeforeUnmount(() => {
       <div class="modal">
         <div class="modal-title">文件已在磁盘上被修改</div>
         <div class="modal-body">
-          “{{ baseName(filePath) }}”在应用外被修改了。{{ dirty ? '当前有未保存的修改，重新加载将放弃这些修改。' : '' }}
+          “{{ displayPath }}”在应用外被修改了。{{ dirty ? '当前有未保存的修改，重新加载将放弃这些修改。' : '' }}
         </div>
         <div class="modal-actions">
           <button @click="reloadFromDisk">重新加载</button>

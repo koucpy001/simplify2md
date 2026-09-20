@@ -41,8 +41,27 @@ class SafBindingsTest {
         }
     }
 
-    private class FakeContent(private val bytes: ByteArray) : DocumentContentReader {
-        override fun read(uri: String): ByteArray = bytes
+    private class FakeContent(
+        private val bytes: ByteArray,
+        private val failRead: Boolean = false,
+    ) : DocumentContentReader {
+        override fun read(uri: String): ByteArray {
+            if (failRead) throw SecurityException("permission revoked")
+            return bytes
+        }
+    }
+
+    private class FakeRecents : RecentsSink {
+        val recorded = mutableListOf<SafDocument>()
+        val currents = mutableListOf<String>()
+
+        override fun record(document: SafDocument) {
+            recorded.add(document)
+        }
+
+        override fun markCurrent(uri: String) {
+            currents.add(uri)
+        }
     }
 
     private fun bindings(
@@ -50,9 +69,12 @@ class SafBindingsTest {
         metadata: DocumentMetadataReader = FakeMetadata(),
         permissions: UriPermissionStore = FakePermissions(),
         content: ByteArray = "hello".toByteArray(Charsets.UTF_8),
+        recents: RecentsSink = NoRecents,
+        contentFailRead: Boolean = false,
     ): SafBindings = SafBindings(
         SafStore(PickerSlot(), launcher, metadata, permissions),
-        FakeContent(content),
+        FakeContent(content, contentFailRead),
+        recents,
     )
 
     @Test
@@ -128,5 +150,52 @@ class SafBindingsTest {
         val launcher = FakeLauncher(create = SafPickOutcome.Cancelled)
         runBlocking { bindings(launcher = launcher).pickSavePath("  ") }
         assertEquals(listOf(SafStore.UNTITLED_NAME), launcher.createdNames)
+    }
+
+    @Test
+    fun openRecordsTheProviderDisplayNameAndMarksItCurrent() {
+        val recents = FakeRecents()
+        val uri = "content://com.android.providers.downloads.documents/document/msf%3A1000000123"
+        runBlocking {
+            bindings(
+                launcher = FakeLauncher(open = SafPickOutcome.Chosen(uri)),
+                metadata = FakeMetadata(name = "年度报告.md", writable = true),
+                recents = recents,
+            ).openFile()
+        }
+
+        assertEquals(listOf("年度报告.md"), recents.recorded.map { it.name })
+        assertEquals(listOf(uri), recents.currents)
+    }
+
+    @Test
+    fun readFailureDoesNotRecordOrMarkCurrent() {
+        val recents = FakeRecents()
+        try {
+            runBlocking {
+                bindings(recents = recents, contentFailRead = true).readFileAt("content://d/gone")
+            }
+        } catch (_: SecurityException) {
+            // Expected: a revoked grant must not leave a recents entry behind.
+        }
+
+        assertTrue(recents.recorded.isEmpty())
+        assertTrue(recents.currents.isEmpty())
+    }
+
+    @Test
+    fun pickSavePathRecordsTheCreatedDocument() {
+        val recents = FakeRecents()
+        val uri = runBlocking {
+            bindings(
+                launcher = FakeLauncher(create = SafPickOutcome.Chosen("content://d/new.md")),
+                metadata = FakeMetadata(name = "new.md", writable = true),
+                recents = recents,
+            ).pickSavePath("未标题.md")
+        }
+
+        assertEquals("content://d/new.md", uri)
+        assertEquals(listOf("new.md"), recents.recorded.map { it.name })
+        assertEquals(listOf("content://d/new.md"), recents.currents)
     }
 }

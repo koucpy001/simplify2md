@@ -34,25 +34,56 @@ import org.json.JSONObject
 class SafBindings(
     private val store: SafStore,
     private val reader: DocumentContentReader,
+    private val recents: RecentsSink = NoRecents,
 ) {
 
     /** `OpenFile`: pick a document, then read and decode it. */
-    suspend fun openFile(): JSONObject = load(store.openDocument())
+    suspend fun openFile(): JSONObject {
+        val doc = store.openDocument()
+        val json = load(doc)
+        remember(doc)
+        return json
+    }
 
-    /** `ReadFileAt`: re-resolve the URI (name + read-only) and read it. */
+    /**
+     * `ReadFileAt`: re-resolve the URI (name + read-only) and read it.
+     *
+     * The entry is remembered only after the read succeeded, so a document that
+     * can no longer be opened is never recorded nor marked as the current one.
+     */
     suspend fun readFileAt(uri: String): JSONObject {
         if (uri.isBlank()) throw BridgeException("empty path")
-        return load(store.describe(uri))
+        val doc = store.describe(uri)
+        val json = load(doc)
+        remember(doc)
+        return json
     }
 
     /**
      * `PickSavePath`: `ACTION_CREATE_DOCUMENT` for save-as. Returns the created
      * URI, or `""` on cancel to match the desktop binding.
+     *
+     * Save-as records the created document immediately (mirroring the desktop
+     * `SaveFile` -> `recordRecent`), so the frontend's post-save
+     * `refreshRecents()` finds the entry and can show its DISPLAY_NAME instead
+     * of the opaque URI.
      */
     suspend fun pickSavePath(defaultName: String): String = try {
-        store.createDocument(defaultName.ifBlank { SafStore.UNTITLED_NAME }).uri
+        val doc = store.createDocument(defaultName.ifBlank { SafStore.UNTITLED_NAME })
+        remember(doc)
+        doc.uri
     } catch (_: BridgeCancelledException) {
         ""
+    }
+
+    /**
+     * Marks [doc] as the currently open document (so recents release logic can
+     * skip its grant) and records it with the provider's DISPLAY_NAME — never
+     * the URI's last segment, which is junk for opaque providers.
+     */
+    private fun remember(doc: SafDocument) {
+        recents.markCurrent(doc.uri)
+        recents.record(doc)
     }
 
     fun registerOn(bridge: Bridge) {

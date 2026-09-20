@@ -103,6 +103,32 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew \
 ./gradlew --stop
 ```
 
+## 最近文件模型（todo 12）
+
+最近文件以 JSON 数组存于 `filesDir/config.json`，每条为
+`{uri, displayName, lastOpened, readonly}`（`storage/AppConfig.kt`）：
+
+- `uri` 是**不透明句柄**（Android 为 SAF 文档 URI，桌面为路径），只用于路由，**绝不**解析其末段当文件名；
+- `displayName` 在 Android 来自 `OpenableColumns.DISPLAY_NAME`（桌面 shim 用 `baseName(path)`）。opaque provider 的 URI 末段
+  （如 `content://…/document/msf%3A1000000123`）是垃圾，因此列表项的名称为空时也只回退到 `baseName`，不会假造文件名；
+- 列表按最近优先，上限 10（对齐桌面 `mdview/app.go:recordRecent`），写入使用同目录临时文件 + rename；
+- 文件损坏 / 缺字段 / 旧版"裸字符串数组"形状都能容忍：解析失败一律视为空列表（不阻塞启动），缺 `uri` 的条目丢弃，
+  裸字符串升级为 `displayName` 为空的条目。
+
+`GetRecents()` 在 `@bridge` 层统一返回 `RecentEntryLike[]`（`{id, name}`）：`id` 即 `uri`，`name` 即 `displayName`。
+
+**授权释放规则**（`storage/RecentsStore.kt`，全部由 JVM 单测锁定）：
+
+- `RemoveRecent(uri)` / `ClearRecents()` 会调用 `releasePersistableUriPermission`，但**绝不释放当前正打开文档的授权**
+  ——否则会话中途丢失写权限，保存 / 前台刷新 / 图片解析全部失效；
+- 清空时跳过当前 URI；仅在条目被真正移除（显式删除或超出上限被淘汰）时释放；
+- 释放失败（provider 无可持久授权、或条目是桌面路径）被吞掉，绝不影响列表变更；配置写失败同样不影响打开/保存。
+
+前端路径工具 `mdview/frontend/src/lib/paths.ts` 提供平台中立的 `baseName` / `dirOf`；`displayPath` 具名 computed
+（`currentName || baseName(filePath) || '未标题.md'`）是工具栏、另存为默认名、状态栏与"文件已被修改"弹窗的唯一名称来源，
+因此界面不会出现 percent-encoded URI 原文。草稿恢复的草稿↔文档绑定由 `src/lib/draft-binding.ts` 的纯函数判定：
+命名草稿仅当 `sha1(uri)` 与当前文档一致才绑定，否则按未命名草稿恢复并清空 `filePath`（防止把草稿覆盖写回启动恢复的文件）。
+
 ## 保存的可靠性（todo 11）
 
 Android 的 SAF 文档 URI **无法**做"临时文件 + rename 覆盖"，因此桌面 `README.md:18` 的文件级
@@ -156,6 +182,8 @@ journal 保留，交给下次启动对账。
   无模拟器的 CI 只能验证到"处理器已注册 + 名称逐字一致 + 纯逻辑单测"，**不得**用"代码看起来对"冒充真机通过。
 - `[device]`（todo 11）：保存过程中强杀 → 重启出现原生三选一恢复弹窗，且默认项与长度判定一致。
   无模拟器无法执行（**DEVICE-DEFERRED**）。
+- `[device]`（todo 12）：最近文件下拉显示正确文件名（而非 `content://` 原文）且可重开；把已记录的文档在外部删除后再重开 →
+  该条目被自动移除且不崩溃。JVM 单测只覆盖模型/释放/命名，端到端 UI 需真机（**DEVICE-DEFERRED**）。
 - 桌面 `README.md:18` 的文件级承诺仅适用于 Windows；Android 的保存语义见上方"保存的可靠性"。
 
 ## 编码语义（todo 9，与桌面的两处差异）

@@ -22,15 +22,19 @@ import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
 import io.github.koucpy001.simplify2md.storage.AndroidBackupFileSystem
+import io.github.koucpy001.simplify2md.storage.AndroidConfigFileSystem
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentContentReader
 import io.github.koucpy001.simplify2md.storage.AndroidDocumentMetadataReader
 import io.github.koucpy001.simplify2md.storage.AndroidRecoveryPrompt
 import io.github.koucpy001.simplify2md.storage.AndroidSafLauncher
 import io.github.koucpy001.simplify2md.storage.AndroidSaveDocumentIo
+import io.github.koucpy001.simplify2md.storage.AndroidUriGrantReleaser
 import io.github.koucpy001.simplify2md.storage.AndroidUriPermissionStore
 import io.github.koucpy001.simplify2md.storage.ReconcileCoordinator
 import io.github.koucpy001.simplify2md.storage.ReconcileEngine
 import io.github.koucpy001.simplify2md.storage.ReconcileNotice
+import io.github.koucpy001.simplify2md.storage.RecentsBindings
+import io.github.koucpy001.simplify2md.storage.RecentsStore
 import io.github.koucpy001.simplify2md.storage.SafBindings
 import io.github.koucpy001.simplify2md.storage.SafStore
 import io.github.koucpy001.simplify2md.storage.SaveBindings
@@ -218,7 +222,15 @@ class MainActivity : Activity() {
                 }
             },
         )
-        SafBindings(safStore, AndroidDocumentContentReader(contentResolver)).registerOn(bridge)
+        // Recents (todo 12): URI + provider DISPLAY_NAME persisted to
+        // filesDir/config.json; the store also owns persisted-grant release and
+        // tracks the currently open document so its grant is never released.
+        val recents = RecentsStore(
+            files = AndroidConfigFileSystem(filesDir),
+            releaser = AndroidUriGrantReleaser(contentResolver),
+        )
+        SafBindings(safStore, AndroidDocumentContentReader(contentResolver), recents).registerOn(bridge)
+        RecentsBindings(recents).registerOn(bridge)
 
         // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
         SaveBindings(SaveStore(backupFs, saveIo, saveIo)).registerOn(bridge)
