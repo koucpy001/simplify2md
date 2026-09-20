@@ -123,6 +123,30 @@ target 36 下 `adjustResize` 已失效，本工程**只用一种机制**，三�
 composing 期跳过逻辑未改动。另有 WebView 最低版本门（`WebViewCompat.getCurrentWebViewPackage`，
 `ime/WebViewMinVersion.kt`，阈值 major ≥ 90）：低于阈值或无法判定时以 Toast 提示输入可能异常。
 
+## 发布签名与版本注入（todo 21）
+
+Release APK 的签名材料**只经环境变量注入**（CI 中来自 GitHub Secrets，仓库零密钥），
+`android/app/build.gradle.kts` 读取以下 4 个环境变量名：
+
+- `ANDROID_KEYSTORE_PATH`（CI 由 `ANDROID_KEYSTORE_BASE64` 解码到临时文件后传入路径）
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+签名判别机制（写死）：
+
+| 场景 | 行为 |
+|---|---|
+| 材料缺失 + 分支/PR 构建 | 跳过签名，打印明确 warning，产出 **unsigned** APK |
+| 材料缺失 + `-PrequireSigning=true` | **构建直接失败**，绝不产出 unsigned 产物 |
+| 材料齐全 | `signingConfigs.release` 生效，产出已签名 APK |
+
+版本注入：仅当显式传 `-PappVersionName` **或** `GITHUB_REF_TYPE == 'tag'` 时才解析版本；
+其余情况（分支/PR）在解析**之前**回退占位值 `0.0.0` / versionCode `1`，分支名绝不当作版本解析。
+`versionName` 为去掉 `v` 前缀的 tag（保留后缀，如 `0.3.0-rc1`）；`versionCode = major*1000000 +
+minor*10000 + patch*100 + channel`（正式版 channel=99，预发布取后缀末尾整数，范围 1–98），
+保证同一版本的正式版 versionCode 严格大于其任何预发布，可顺序覆盖安装。
+
 ## 构建与测试
 
 ```bash
