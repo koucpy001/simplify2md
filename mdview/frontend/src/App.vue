@@ -1412,6 +1412,8 @@ onBeforeUnmount(() => {
       <button @click="open">打开</button>
       <button @click="save">保存</button>
       <button @click="saveAs">另存为</button>
+      <!-- Touch entry for find (todo 16): desktop keeps Ctrl+F; this reuses openFind(). -->
+      <button @click="openFind">查找</button>
       <span class="seg">
         <button :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
         <button :class="{ active: viewMode === 'split' }" @click="viewMode = 'split'">分屏</button>
@@ -1436,6 +1438,25 @@ onBeforeUnmount(() => {
       <!-- Reading progress: hidden in edit mode (no preview scrolling there). -->
       <div v-if="viewMode !== 'edit'" class="progress-track">
         <div class="progress-bar" :style="{ width: progressPct + '%' }"></div>
+      </div>
+      <!-- Findbar lives inside .toolbar and anchors to its bottom edge
+           (todo 16): it tracks toolbar height across touch wrapping and the
+           future safe-area paddingTop (todo 17) without hardcoded offsets. -->
+      <div v-if="findVisible" class="findbar">
+        <input
+          ref="findInputEl"
+          v-model="findText"
+          placeholder="查找..."
+          spellcheck="false"
+          @keydown.enter.prevent="findNext($event.shiftKey)"
+          @keydown.esc.stop="closeFind"
+        />
+        <span class="find-count">
+          {{ findText ? (matchPositions.length ? (findCapped ? '500+' : (matchIndex + 1) + '/' + matchPositions.length) : '无结果') : '' }}
+        </span>
+        <button title="上一个 (Shift+F3)" @click="findNext(true)">↑</button>
+        <button title="下一个 (F3 / Enter)" @click="findNext(false)">↓</button>
+        <button title="关闭 (Esc)" @click="closeFind">✕</button>
       </div>
     </div>
     <div class="main" :class="'mode-' + viewMode">
@@ -1465,22 +1486,6 @@ onBeforeUnmount(() => {
             @click="toggleOutlineLevel(vo.item.level, $event)"
           >▾</span>{{ vo.item.text }}</div>
       </div>
-    </div>
-    <div v-if="findVisible" class="findbar">
-      <input
-        ref="findInputEl"
-        v-model="findText"
-        placeholder="查找..."
-        spellcheck="false"
-        @keydown.enter.prevent="findNext($event.shiftKey)"
-        @keydown.esc.stop="closeFind"
-      />
-      <span class="find-count">
-        {{ findText ? (matchPositions.length ? (findCapped ? '500+' : (matchIndex + 1) + '/' + matchPositions.length) : '无结果') : '' }}
-      </span>
-      <button title="上一个 (Shift+F3)" @click="findNext(true)">↑</button>
-      <button title="下一个 (F3 / Enter)" @click="findNext(false)">↓</button>
-      <button title="关闭 (Esc)" @click="closeFind">✕</button>
     </div>
     <div v-if="exitConfirmVisible" class="modal-mask">
       <div class="modal">
@@ -1616,10 +1621,26 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 .outline-arrow { display: inline-block; width: 14px; text-align: center; color: var(--faint); cursor: pointer; transition: transform .12s ease; }
 .outline-arrow.collapsed { transform: rotate(-90deg); }
 .outline-empty { padding: 6px 10px; color: var(--faint); font-size: 12px; }
-.findbar { position: absolute; top: 44px; right: 16px; display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 60; }
+/* Findbar is a child of .toolbar (todo 16): anchored to the toolbar's bottom
+   edge so it tracks touch wrapping and the future safe-area paddingTop
+   (todo 17) instead of a hardcoded top offset. */
+.findbar { position: absolute; top: calc(100% + 2px); right: 16px; display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 60; }
 .findbar input { width: 180px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg); color: var(--fg); outline: none; }
 .findbar .find-count { font-size: 12px; color: var(--muted); min-width: 44px; text-align: center; }
 .findbar button { padding: 2px 8px; cursor: pointer; background: var(--input-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+/* Touch accessibility (todo 16): on coarse-pointer devices (Android WebView)
+   every essential control gets a >=48dp hit target. Desktop (pointer: fine)
+   keeps the exact current metrics — no visual or behavioural regression. */
+@media (pointer: coarse) {
+  .toolbar button, .toolbar .recents { min-height: 48px; min-width: 48px; }
+  .toolbar button { padding: 8px 14px; }
+  .findbar input { min-height: 48px; }
+  .findbar button { min-height: 48px; min-width: 48px; padding: 8px 12px; }
+  .outline-item { padding: 15px 8px; }
+  /* Negative-margin trick: the arrow's hit area stretches to the full 48dp row
+     height without changing the row's layout flow. */
+  .outline-arrow { width: 32px; padding: 15px 0; margin: -15px 0; }
+}
 .preview h1, .preview h2, .preview h3 { line-height: 1.3; }
 .preview img { max-width: 100%; height: auto; }
 .preview pre { background: var(--code-bg); padding: 12px; overflow: auto; border-radius: 4px; }
