@@ -106,8 +106,25 @@ jobs:
         with:
           node-version: 20
 
-      # SDK 安装与 .github/workflows/android-ci.yml 保持一致
+      # SDK 安装与 .github/workflows/android-ci.yml 保持一致：必须显式传 packages，
+      # 否则 action 走默认行为尝试安装早已下架的 `tools` 包并失败
+      # （"Failed to find package 'tools'"，v0.3.0-rc1 首跑即因此变红）。
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      # setup-android 不会导出 SDK 根路径；与 android-ci.yml 相同地归一化两个变量名。
+      - name: Export ANDROID_HOME / ANDROID_SDK_ROOT
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          test -d "$SDK_ROOT"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "Android SDK root: $SDK_ROOT"
 
       - name: Install Android SDK packages
         run: |
