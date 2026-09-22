@@ -269,14 +269,22 @@ jobs:
             fi
           } > release-notes.md
 
+      # 上传前先平铺到统一 staging 目录：upload-artifact@v4 对多个不同层级的路径
+      # 会按最小公共祖先（仓库根）保留目录结构，直接上传会让 publish 下载出
+      # dist/mdview/build/bin/… 的嵌套布局（v0.3.0-rc1 首跑 publish 即因此失败）。
+      - name: Stage Windows artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp mdview/build/bin/simplify2md.exe dist/
+          cp mdview/build/bin/simplify2md-amd64-installer.exe dist/
+          cp release-notes.md dist/
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
-          path: |
-            mdview/build/bin/simplify2md.exe
-            mdview/build/bin/simplify2md-amd64-installer.exe
-            release-notes.md
+          path: dist
 
   build-android:
     name: Android signed release APK
