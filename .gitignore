@@ -22,3 +22,9 @@ hybrid_auto/
 
 # 图标中间产物
 mdview/build/icon-src/
+
+# 发布签名材料：keystore 只存在于本机与离线备份，绝不入库
+*.jks
+*.keystore
+*.p12
+*.b64

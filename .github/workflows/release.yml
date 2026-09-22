@@ -1,6 +1,8 @@
 name: Release
 
-# 推送 v* 标签触发：runner 上全新构建便携版 + NSIS 安装包，发布 GitHub Release。
+# 推送 v* 标签触发：两个构建 job 并行，唯一 publish job 串行创建 Release。
+# 单一创建者是刻意的：若 Windows 与 Android 各自创建 Release，两者会争抢同一 tag，
+# 后到者失败；"两构建并行 + 唯一 publish" 从结构上根除该竞态，无需轮询重试。
 on:
   push:
     tags: ['v*']
@@ -9,12 +11,13 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build-windows:
+    name: Windows portable + NSIS installer
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 完整历史：生成上一标签以来的更新日志
+          fetch-depth: 0  # 完整历史：release-notes 需要 git describe/log
 
       - uses: actions/setup-go@v5
         with:
@@ -52,6 +55,8 @@ jobs:
         working-directory: mdview
         run: wails build -nsis -s -ldflags "-X main.appVersion=$GITHUB_REF_NAME"
 
+      # release-notes 在此生成（本 job 有完整 git 历史），作为 artifact 传给 publish，
+      # 使 publish 无需 checkout 完整历史。
       - name: Build release notes
         shell: bash
         run: |
@@ -62,8 +67,9 @@ jobs:
             echo "|---|---|"
             echo "| \`simplify2md-amd64-installer.exe\` | 安装版：开始菜单/桌面快捷方式、卸载器、注册 .md/.markdown 文件关联 |"
             echo "| \`simplify2md.exe\` | 便携版：单文件，拷贝即用 |"
+            echo "| \`simplify2md-${GITHUB_REF_NAME}.apk\` | Android 版 |"
             echo ""
-            echo "两个版本均未签名，首次运行如遇 SmartScreen 提示，选择“更多信息 → 仍要运行”。WebView2 运行时 Windows 10/11 自带。"
+            echo "两个 Windows 版本均未签名，首次运行如遇 SmartScreen 提示，选择“更多信息 → 仍要运行”。WebView2 运行时 Windows 10/11 自带。"
             echo ""
             echo "## 更新内容"
             echo ""
@@ -75,7 +81,142 @@ jobs:
             fi
           } > release-notes.md
 
-      - name: Create release
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            mdview/build/bin/simplify2md.exe
+            mdview/build/bin/simplify2md-amd64-installer.exe
+            release-notes.md
+
+  build-android:
+    name: Android signed release APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # SDK 安装与 .github/workflows/android-ci.yml 保持一致
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install \
+            "platforms;android-36" "build-tools;36.0.0"
+
+      # 缺 Secret 直接 fail —— 绝不在 tag 上产出 unsigned 发布产物。
+      - name: Precheck signing secret
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not configured — refusing to build an unsigned release"
+            exit 1
+          fi
+
+      - name: Decode keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      # 前端构建由 app/build.gradle.kts 的 stageFrontendAssets 唯一负责
+      # （与 android-ci.yml 同一设计，不重复 npm ci）。
+      - name: Build signed release APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease -PrequireSigning=true -PappVersionName="$GITHUB_REF_NAME"
+
+      # 确认产物已签名，且证书不是 debug 证书。
+      - name: Verify the APK certificate is not the debug certificate
+        working-directory: android
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | grep -v unsigned | head -1)
+          test -n "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
+          if grep -q "CN=Android Debug" /tmp/certs.txt; then
+            echo "::error::release APK is signed with the DEBUG certificate"
+            exit 1
+          fi
+
+      - name: Name the APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | grep -v unsigned | head -1)
+          cp "$APK" "simplify2md-${GITHUB_REF_NAME}.apk"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-dist
+          path: android/simplify2md-${{ github.ref_name }}.apk
+
+  publish:
+    name: Publish the release (sole creator)
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-android]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 显式声明下载路径：两件 Windows 产物 + release-notes.md 平铺到 dist/
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-dist
+          path: dist
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-dist
+          path: dist
+
+      - name: Show downloaded files
+        run: find dist -type f | sort
+
+      # --latest 仅用于正式版 tag；预发布必须 --prerelease（不得标记为 Latest）
+      - name: Compute LATEST_FLAG
+        id: flag
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "value=--latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=--prerelease" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" mdview/build/bin/simplify2md.exe mdview/build/bin/simplify2md-amd64-installer.exe --title "simplify2md $env:GITHUB_REF_NAME" --notes-file release-notes.md --latest
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "simplify2md $GITHUB_REF_NAME" \
+            --notes-file dist/release-notes.md \
+            "${{ steps.flag.outputs.value }}" \
+            dist/simplify2md.exe \
+            dist/simplify2md-amd64-installer.exe \
+            "dist/simplify2md-${GITHUB_REF_NAME}.apk"

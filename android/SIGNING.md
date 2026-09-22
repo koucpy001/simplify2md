@@ -255,7 +255,7 @@ jobs:
             echo "|---|---|"
             echo "| \`simplify2md-amd64-installer.exe\` | 安装版：开始菜单/桌面快捷方式、卸载器、注册 .md/.markdown 文件关联 |"
             echo "| \`simplify2md.exe\` | 便携版：单文件，拷贝即用 |"
-            echo "| \`simplify2md-${GITHUB_REF_NAME}-android.apk\` | Android 版 |"
+            echo "| \`simplify2md-${GITHUB_REF_NAME}.apk\` | Android 版 |"
             echo ""
             echo "两个 Windows 版本均未签名，首次运行如遇 SmartScreen 提示，选择“更多信息 → 仍要运行”。WebView2 运行时 Windows 10/11 自带。"
             echo ""
@@ -352,13 +352,13 @@ jobs:
         run: |
           set -euo pipefail
           APK=$(ls app/build/outputs/apk/release/*.apk | grep -v unsigned | head -1)
-          cp "$APK" "simplify2md-${GITHUB_REF_NAME}-android.apk"
+          cp "$APK" "simplify2md-${GITHUB_REF_NAME}.apk"
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-dist
-          path: android/simplify2md-${{ github.ref_name }}-android.apk
+          path: android/simplify2md-${{ github.ref_name }}.apk
 
   publish:
     name: Publish the release (sole creator)
@@ -406,7 +406,7 @@ jobs:
             "${{ steps.flag.outputs.value }}" \
             dist/simplify2md.exe \
             dist/simplify2md-amd64-installer.exe \
-            "dist/simplify2md-${GITHUB_REF_NAME}-android.apk"
+            "dist/simplify2md-${GITHUB_REF_NAME}.apk"
 ```
 
 ### 验收
@@ -419,7 +419,7 @@ gh run list --workflow=release.yml --limit 1
 gh release view v0.3.0-rc1 --json assets --jq '.assets[].name'
 ```
 
-期望：3 个资产（两个 exe + `simplify2md-v0.3.0-rc1-android.apk`），
+期望：3 个资产（两个 exe + `simplify2md-v0.3.0-rc1.apk`），
 且该 Release 是 **Pre-release**（`-rc1` 不匹配 `^vX.Y.Z$`）。
 
 ```bash

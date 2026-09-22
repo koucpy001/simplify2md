@@ -39,14 +39,20 @@ val npmCommand = if (System.getProperty("os.name").lowercase().contains("windows
 //     warning, produce an UNSIGNED artifact;
 //   - material absent + -PrequireSigning=true -> throw and fail the build;
 //     an unsigned release artifact must never be produced in that case.
+// The env-derived values are deliberately prefixed with "env": inside the
+// signingConfigs.create("release") { } block below, an unqualified `keyPassword`
+// (or storePassword / keyAlias) resolves to the SigningConfig receiver's own
+// property -- still null at that point -- instead of this script's value. That
+// self-assignment silently nulls the property and AGP then fails the build with
+// 'SigningConfig "release" is missing required property "keyPassword"'.
 val envVars = System.getenv()
-val keystorePath = envVars["ANDROID_KEYSTORE_PATH"]?.trim().orEmpty()
-val keystorePassword = envVars["ANDROID_KEYSTORE_PASSWORD"]?.trim().orEmpty()
-val keyAlias = envVars["ANDROID_KEY_ALIAS"]?.trim().orEmpty()
-val keyPassword = envVars["ANDROID_KEY_PASSWORD"]?.trim().orEmpty()
+val envKeystorePath = envVars["ANDROID_KEYSTORE_PATH"]?.trim().orEmpty()
+val envKeystorePassword = envVars["ANDROID_KEYSTORE_PASSWORD"]?.trim().orEmpty()
+val envKeyAlias = envVars["ANDROID_KEY_ALIAS"]?.trim().orEmpty()
+val envKeyPassword = envVars["ANDROID_KEY_PASSWORD"]?.trim().orEmpty()
 val signingMaterialPresent =
-    keystorePath.isNotBlank() && keystorePassword.isNotBlank() &&
-        keyAlias.isNotBlank() && keyPassword.isNotBlank()
+    envKeystorePath.isNotBlank() && envKeystorePassword.isNotBlank() &&
+        envKeyAlias.isNotBlank() && envKeyPassword.isNotBlank()
 val requireSigning = providers.gradleProperty("requireSigning").orNull == "true"
 
 if (requireSigning && !signingMaterialPresent) {
@@ -211,10 +217,10 @@ android {
     signingConfigs {
         if (signingMaterialPresent) {
             create("release") {
-                storeFile = file(keystorePath)
-                storePassword = keystorePassword
-                keyAlias = keyAlias
-                keyPassword = keyPassword
+                storeFile = file(envKeystorePath)
+                storePassword = envKeystorePassword
+                keyAlias = envKeyAlias
+                keyPassword = envKeyPassword
             }
         }
     }
