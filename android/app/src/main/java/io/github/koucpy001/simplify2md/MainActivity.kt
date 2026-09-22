@@ -34,6 +34,7 @@ import io.github.koucpy001.simplify2md.binding.StartupFileGate
 import io.github.koucpy001.simplify2md.binding.StartupTextBuffer
 import io.github.koucpy001.simplify2md.bridge.AppEvents
 import io.github.koucpy001.simplify2md.bridge.Bridge
+import io.github.koucpy001.simplify2md.encoding.CommonHanStatisticDetector
 import io.github.koucpy001.simplify2md.ime.WebViewMinVersion
 import io.github.koucpy001.simplify2md.image.AndroidChildDocumentUriBuilder
 import io.github.koucpy001.simplify2md.image.AndroidImageDocumentReader
@@ -381,6 +382,10 @@ class MainActivity : Activity() {
             // A successful document load bumps the image generation and rejects
             // the previous document's pending tree requests (plan todo 13, D5).
             onDocumentLoaded = { uri -> imageCoordinator.onDocumentLoaded(uri) },
+            // Statistical charset verdict (the desktop chardet role): consulted
+            // before the strict probes so real GB18030/Big5 documents are not
+            // classified by whichever probe happens to accept them first.
+            statDetector = CommonHanStatisticDetector,
         ).registerOn(bridge)
         RecentsBindings(recents).registerOn(bridge)
 
@@ -429,8 +434,15 @@ class MainActivity : Activity() {
         // SaveFile (todo 11): encode in memory, then rollback-on-failure + journal.
         // The self-write window is opened BEFORE the write (todo 19), mirroring
         // the Go watcher's mark at the top of SaveFile (`mdview/app.go:226`).
-        SaveBindings(SaveStore(backupFs, saveIo, saveIo), onSelfWrite = selfWriteWindow::mark)
-            .registerOn(bridge)
+        // The write gate ports the desktop `canWrite` whitelist (`app.go:222`):
+        // read-only documents are refused before the state machine starts,
+        // otherwise its kept journal would surface as a spurious recovery
+        // dialog on the next launch.
+        SaveBindings(
+            SaveStore(backupFs, saveIo, saveIo),
+            onSelfWrite = selfWriteWindow::mark,
+            canWrite = { uri -> !safStore.describe(uri).readonly },
+        ).registerOn(bridge)
 
         // Autosave drafts (todo 14): app-private filesDir/autosave/, keys are
         // sha1(uri) or the literal "untitled" (DraftKey.of, matching App.vue).

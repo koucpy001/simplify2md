@@ -222,6 +222,12 @@ Android 的 SAF 文档 URI **无法**做"临时文件 + rename 覆盖"，因此�
 
 保存流程（`storage/SaveStore.kt`）：
 
+0. **写入门禁**（`SaveBindings`，移植桌面 `mdview/app.go:222` 的 `canWrite` 白名单）：
+   只读文档（provider 无 `FLAG_SUPPORTS_WRITE`）在进入状态机**之前**就以
+   `path not permitted`（与 Go 错误串逐字一致）拒绝。没有这道门禁，对只读文档的保存会先写好
+   backup + journal（期望哈希是**新内容**）再在 `openWrite` 失败，journal 被刻意保留，
+   下次启动对账发现 `writing` 状态哈希不匹配，弹出**误导性的三选一恢复弹窗**；
+
 1. 先在内存完成全部编码与换行转换（`encoding/Encoding.kt`）；
 2. 从目标 URI 读出**当前磁盘字节**（不是编辑器内存内容），复制到 `filesDir/backup/<hash>.bak`
    （`<hash> = SHA-256(目标 URI 字符串)`；用 `filesDir` 而**非** `cacheDir`，后者可能被系统回收）；
@@ -365,9 +371,18 @@ lazySrc 匹配到新文档节点（串图 / 缓存污染）。
    reject 并携带稳定令牌 `encoding-unmappable`，**绝不**用 Java 默认 REPLACE 静默写成 `?`；前端据该
    令牌弹出"另存为 UTF-8"提示，且只在用户确认后才把 `fileEnc` 切到 `utf-8` 并走另存为。
 
-**探测顺序说明**：Go 原版在 GB18030/Big5 探测前先跑 `chardet` 统计检测；本移植不引入 chardet，
-而 GB18030 是近超集、能严格解码绝大多数字节序列（包括 Big5 文本），因此**先探测 Big5、后探测 GB18030**
-（Big5 更严格，严格解码成功是更强的信号），否则 Big5 文件会被误判为 GB18030 并在保存时被改写。
-等价性只对共享静态夹具语料断言（`android/tools/generate-encoding-fixtures.py` 生成，
-路径记录在 `.omo/evidence/task-9-android-apk-port.md`），不做"与 chardet 等价"声明。
-`[device]` 追加一次 GB18030/Big5 真机往返：Android 的 charset 由 ICU 提供，JVM 通过**不蕴含**真机通过。
+**探测顺序说明**：Go 原版在 GB18030/Big5 探测前先跑 `chardet` 统计检测；本移植以纯 Kotlin 的
+统计判别器承担同一角色（`encoding/CommonHanStatisticDetector.kt`，注入 seam
+`EncodingCodec.CharsetStatDetector`，零第三方依赖——`android.icu.text.CharsetDetector` 不在
+Android 公开 SDK 内，android.jar 无任何字符集检测类）。方法是把字节**双向严格解码**后按
+"简繁合并常用字表"命中数打分取高（这正是 chardet 频率信号的最小可移植内核；实测双向各
+10 篇歧义文档——即对方字符集也能严格解码的那批——判对 10/10，错误方向命中数全为 0），
+平局回退乱码区块信号，仍平局则"无意见"。这不是装饰性对齐：实测（桌面 JVM，纯严格探测）
+10 个常见简体 GB18030 文档有 5 个能同时被 Big5 严格解码——GB18030 与 Big5 双字节空间大量
+重叠，**任一固定顺序的纯严格探测都必然吃掉另一族**（Big5 先则 GBK 文件乱码，GB18030 先则
+Big5 文件乱码），只有统计层能区分。统计层无意见（极短片段/双方得分相同）时回退 Big5 先行
+的严格探测，此盲区在 `EncodingTest` 的 `ambiguousSimplified` 用例旁注明确声明。等价性只对
+共享静态夹具语料断言（`android/tools/generate-encoding-fixtures.py` 生成，路径记录在
+`.omo/evidence/task-9-android-apk-port.md`），不做"与 chardet 等价"声明。
+`[device]` 追加一次 GB18030/Big5 真机往返：统计判别器与严格探测同为纯 JVM 代码，但设备端
+charset 实现由系统 ICU 提供，JVM 通过**不蕴含**真机通过。

@@ -5,6 +5,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -127,6 +128,121 @@ class EncodingTest {
         assertFalse(EncodingCodec.containsCJK("plain ascii"))
         assertFalse(EncodingCodec.containsCJK("\u3000\uFF01")) // CJK punctuation is outside the ranges
         assertFalse(EncodingCodec.containsCJK(""))
+    }
+
+    // ---- statistical detector seam (the desktop chardet role) ---------------
+
+    /**
+     * A GB18030 document whose bytes ALSO strictly decode as Big5 — the exact
+     * blind spot of the probe-only path. Measured on the desktop JVM: 5 of 10
+     * common simplified GB18030 documents land here, rendering as
+     * "斕疑岍賜ㄛ洴岆珨僇…" mojibake when the statistical layer is absent.
+     * (The committed fixture corpus happens to contain only the other half —
+     * documents the Big5 probe rejects — which is why CI never caught this.)
+     */
+    private val ambiguousSimplified = "# 使用说明\n\n这是项目的中文说明文档，包含安装步骤和注意事项。"
+        .toByteArray(charset("GB18030"))
+
+    @Test
+    fun statisticalVerdictOutranksTheStrictProbes() {
+        // With a confident statistical layer this document is gb18030, even
+        // though the Big5 probe would strictly decode it (the P1 scenario).
+        val detected = EncodingCodec.detectEncoding(
+            ambiguousSimplified,
+        ) { _ -> EncodingCodec.GB18030 }
+        assertEquals(EncodingCodec.GB18030, detected)
+    }
+
+    @Test
+    fun statisticalBig5VerdictOutranksTheProbes() {
+        // Symmetric: a Big5 document that also strictly decodes as GB18030
+        // must be big5 when the statistics say so.
+        val big5Doc = "這是一段繁體中文測試文字，用來驗證統計層的判別。".toByteArray(charset("Big5"))
+        assertEquals(EncodingCodec.BIG5, EncodingCodec.detectEncoding(big5Doc) { _ -> EncodingCodec.BIG5 })
+    }
+
+    @Test
+    fun noStatisticalOpinionFallsThroughToTheProbes() {
+        // null / unknown verdicts must not change the probe-only outcome.
+        assertEquals(
+            "probe-only result",
+            EncodingCodec.detectEncoding(ambiguousSimplified),
+            EncodingCodec.detectEncoding(ambiguousSimplified) { _ -> null },
+        )
+        assertEquals(
+            "an unrelated ICU verdict (e.g. ISO-8859-x) is no opinion here",
+            EncodingCodec.detectEncoding(ambiguousSimplified),
+            EncodingCodec.detectEncoding(ambiguousSimplified) { _ -> "ISO-8859-1" },
+        )
+    }
+
+    @Test
+    fun statisticalLayerIsNotConsultedForUtf8OrNulInput() {
+        // UTF-8 wins before any detector runs; NUL-containing input never
+        // reaches the CJK branch (the Go `bytes.IndexByte(b, 0) == -1` guard).
+        val spy = RecordingDetector()
+        assertEquals(EncodingCodec.UTF_8, EncodingCodec.detectEncoding("café".toByteArray(), spy))
+        assertEquals(
+            EncodingCodec.ISO_8859_1,
+            EncodingCodec.detectEncoding(byteArrayOf(0x00, 0xE9.toByte()), spy),
+        )
+        assertEquals("the detector must not run for UTF-8 or NUL input", 0, spy.calls)
+    }
+
+    /** Fake detector that counts invocations and always reports no opinion. */
+    private class RecordingDetector : EncodingCodec.CharsetStatDetector {
+        var calls = 0
+        override fun detect(b: ByteArray): String? {
+            calls++
+            return null
+        }
+    }
+
+    @Test
+    fun decodeCombinedUsesTheStatisticalDetector() {
+        val decoded = EncodingCodec.decode(ambiguousSimplified) { _ -> EncodingCodec.GB18030 }
+        assertEquals(EncodingCodec.GB18030, decoded.encoding)
+        assertArrayEquals(ambiguousSimplified, EncodingCodec.encodeContent(decoded.content, decoded.encoding))
+    }
+
+    // ---- the production detector itself ------------------------------------
+
+    /** Documents the OTHER family's strict decoder also accepts: the P1 blind spot. */
+    private val ambiguousTraditional = "# 使用說明\n\n這是專案的中文說明文件，包含安裝步驟和注意事項。"
+        .toByteArray(charset("Big5"))
+
+    @Test
+    fun productionDetectorResolvesAmbiguousSimplifiedDocuments() {
+        assertEquals(
+            "GB18030 text that also strictly decodes as Big5 must be gb18030",
+            EncodingCodec.GB18030,
+            CommonHanStatisticDetector.detect(ambiguousSimplified),
+        )
+    }
+
+    @Test
+    fun productionDetectorResolvesAmbiguousTraditionalDocuments() {
+        assertEquals(
+            "Big5 text that also strictly decodes as GB18030 must be big5",
+            EncodingCodec.BIG5,
+            CommonHanStatisticDetector.detect(ambiguousTraditional),
+        )
+    }
+
+    @Test
+    fun productionDetectorEndToEndThroughDecode() {
+        // The wiring the app actually uses: SafBindings -> decode(bytes, statDetector).
+        val d = EncodingCodec.decode(ambiguousSimplified, CommonHanStatisticDetector)
+        assertEquals(EncodingCodec.GB18030, d.encoding)
+        assertEquals("# 使用说明", d.content.lineSequence().first())
+    }
+
+    @Test
+    fun productionDetectorHasNoOpinionForUndecidableInput() {
+        // Latin-1 byte pairs that neither family strictly decodes: no opinion,
+        // the strict probes / byte-fidelity fallback decide.
+        assertNull(CommonHanStatisticDetector.detect(byteArrayOf(0xE9.toByte(), 0x41)))
+        assertNull(CommonHanStatisticDetector.detect(ByteArray(0)))
     }
 
     @Test

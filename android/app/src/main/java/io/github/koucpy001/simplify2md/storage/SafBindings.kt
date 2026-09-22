@@ -36,6 +36,13 @@ class SafBindings(
     private val reader: DocumentContentReader,
     private val recents: RecentsSink = NoRecents,
     private val onDocumentLoaded: (String) -> Unit = {},
+    /**
+     * Statistical charset verdict for the GB18030/Big5 ambiguity, consulted
+     * before the strict probes (the desktop `chardet` role, `mdview/app.go:463`).
+     * Production injects ICU (`encoding/AndroidCharsetStatDetector.kt`); the
+     * default keeps the pure strict-probe path for unwired tests.
+     */
+    private val statDetector: EncodingCodec.CharsetStatDetector? = null,
 ) {
 
     /** `OpenFile`: pick a document, then read and decode it. */
@@ -101,7 +108,7 @@ class SafBindings(
 
     private fun load(doc: SafDocument): JSONObject {
         val bytes = reader.read(doc.uri)
-        val decoded = EncodingCodec.decode(bytes)
+        val decoded = EncodingCodec.decode(bytes, statDetector)
         return JSONObject()
             .put(KEY_PATH, doc.uri)
             .put(KEY_CONTENT, decoded.content)

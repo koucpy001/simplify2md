@@ -28,10 +28,22 @@ class SaveBindings(
      * no-op so the save semantics are unchanged when recents are not wired.
      */
     private val onSelfWrite: () -> Unit = {},
+    /**
+     * Write gate porting the desktop `canWrite` whitelist (`mdview/app.go:222`):
+     * a URI the provider will not take a write for (read-only document, or a
+     * foreign URI the app holds no grant for) must be rejected BEFORE the save
+     * state machine starts. Otherwise the backup + journal it writes before the
+     * write fails are deliberately kept, and the next launch's reconciliation
+     * finds a `writing` journal whose expected hash never matches — a spurious
+     * three-choice recovery dialog for a save that was refused. Defaults to
+     * "permitted" so unwired tests keep the plain save semantics.
+     */
+    private val canWrite: (path: String) -> Boolean = { true },
 ) {
 
     suspend fun saveFile(path: String, content: String, encoding: String, newline: String) {
         if (path.isBlank()) throw BridgeException("empty path")
+        if (!canWrite(path)) throw BridgeException(WRITE_NOT_PERMITTED)
         onSelfWrite()
         val encoded = try {
             EncodingCodec.encodeContent(EncodingCodec.applyNewline(content, newline), encoding)
@@ -52,5 +64,14 @@ class SaveBindings(
             )
             null
         }
+    }
+
+    companion object {
+        /**
+         * Mirrors the desktop Go error string verbatim (`mdview/app.go:224`:
+         * `errors.New("path not permitted")`) so the frontend's existing save
+         * failure handling behaves identically on both platforms.
+         */
+        const val WRITE_NOT_PERMITTED = "path not permitted"
     }
 }

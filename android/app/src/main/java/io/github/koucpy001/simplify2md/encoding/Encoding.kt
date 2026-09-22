@@ -74,34 +74,58 @@ object EncodingCodec {
     // ---- encoding detection / conversion (app.go:459-521) -------------------
 
     /**
+     * Statistical charset verdict for the CJK ambiguity — the role the desktop
+     * fills with `chardet` (`mdview/app.go:463-470`). Returns `gb18030` /
+     * `big5` when confident, or null when it has no opinion; any other value is
+     * ignored by [EncodingCodec].
+     *
+     * Why the strict probes cannot do this alone: the GB18030 and Big5
+     * double-byte spaces overlap so heavily that most real text of EITHER
+     * family strictly decodes as both (measured on the desktop JVM, 5 of 10
+     * common simplified GB18030 documents strictly decode as Big5 — and Big5
+     * documents strictly decode as GB18030 just as easily). Whichever probe
+     * runs first simply swallows the other family, so strict decoding is a
+     * fallback, never the discriminator. On Android the production
+     * implementation is ICU's `CharsetDetector` (built into the platform, no
+     * third-party dependency); this seam keeps the decision layer pure JVM and
+     * fakeable in JUnit.
+     */
+    fun interface CharsetStatDetector {
+        fun detect(b: ByteArray): String?
+    }
+
+    /**
      * Port of Go `detectEncoding` (`app.go:459-486`).
      *
-     * Valid UTF-8 wins. Otherwise the Big5 and GB18030 probes run only when the
-     * input has no NUL byte (the Go `bytes.IndexByte(b, 0) == -1` guard at
-     * `app.go:471` and `:479`) and the strictly decoded text contains a Han
-     * character ([containsCJK], `app.go:488-496`). Anything else is the
-     * byte-fidelity fallback [ISO_8859_1].
+     * Valid UTF-8 wins. Otherwise, for input with no NUL byte, the statistical
+     * detector is consulted FIRST (the port of the Go `chardet` step); a
+     * confident `gb18030`/`big5` verdict outranks the probes. When statistics
+     * have no opinion, the Big5 and GB18030 strict probes run (the Go
+     * `bytes.IndexByte(b, 0) == -1` guard at `app.go:471`/`:479`), requiring
+     * the decoded text to contain a Han character ([containsCJK],
+     * `app.go:488-496`). Anything else is the byte-fidelity fallback
+     * [ISO_8859_1].
      *
-     * **Probe order is deliberately Big5-first.** The Go original runs `chardet`
-     * before the probes, so a Big5 file is identified statistically before the
-     * GB18030 sanity probe can swallow it. `chardet` is intentionally not ported
-     * (the plan forbids third-party detectors), and GB18030 is a near-superset
-     * that strictly decodes most byte sequences — including Big5 text — so a
-     * GB18030-first order would mis-detect every Big5 file and re-encode it with
-     * different bytes on save. Big5 is the more restrictive charset, so a strict
-     * Big5 decode succeeding is the stronger signal and must be tried first.
-     * Equivalence is asserted only over the shared static fixture corpus; no
-     * "equivalent to chardet" claim is made.
+     * **Residual blind spot, stated honestly:** the fallback probe order is
+     * Big5-first, so a GB18030 document that strictly decodes as Big5 AND that
+     * the statistical layer cannot classify (e.g. a very short fragment) still
+     * displays as Big5 mojibake. Bytes are never corrupted (the round trip is
+     * label-faithful); only the display suffers, and only for inputs the
+     * statistics reject. Reversing the order would not help — it would swap the
+     * victim family to Big5 documents instead (measured, see
+     * [CharsetStatDetector]); only statistics separates the two.
      */
-    fun detectEncoding(b: ByteArray): String {
+    fun detectEncoding(b: ByteArray, statDetector: CharsetStatDetector? = null): String {
         if (isValidUtf8(b)) return UTF_8
-        // Big5 probe first: GB18030 strictly decodes Big5 bytes too, so a
-        // GB18030-first order would mis-detect Big5 files (see class comment).
         if (!hasNul(b)) {
+            // Statistical layer first — the chardet role. A confident CJK
+            // verdict outranks the strict probes, which cannot disambiguate
+            // the GB18030/Big5 overlap by themselves.
+            val statistical = statDetector?.detect(b)
+            if (statistical == GB18030 || statistical == BIG5) return statistical
+            // Fallback probes, Big5-first (order unchanged from todo 9).
             val big5 = decodeStrict(b, BIG5_CHARSET)
             if (big5 != null && !big5.contains('\uFFFD') && containsCJK(big5)) return BIG5
-        }
-        if (!hasNul(b)) {
             val gb = decodeStrict(b, GB18030_CHARSET)
             if (gb != null && !gb.contains('\uFFFD') && containsCJK(gb)) return GB18030
         }
@@ -146,8 +170,8 @@ object EncodingCodec {
      * downgraded to [ISO_8859_1] alongside the byte-fidelity content, so the
      * pair stays self-consistent and a later save cannot corrupt the file.
      */
-    fun decode(b: ByteArray): Decoded {
-        val detected = detectEncoding(b)
+    fun decode(b: ByteArray, statDetector: CharsetStatDetector? = null): Decoded {
+        val detected = detectEncoding(b, statDetector)
         val content = when (detected) {
             GB18030 -> decodeStrict(b, GB18030_CHARSET)
             BIG5 -> decodeStrict(b, BIG5_CHARSET)
@@ -229,6 +253,18 @@ object EncodingCodec {
     } catch (_: CharacterCodingException) {
         null
     }
+
+    /**
+     * Charset-name entry to [decodeStrict] for [CommonHanStatisticDetector],
+     * which decodes the same bytes both ways to score them. Internal to the
+     * encoding package: only the four known charsets are reachable.
+     */
+    internal fun decodeStrictPublic(b: ByteArray, charsetName: String): String? =
+        when (charsetName) {
+            "GB18030" -> decodeStrict(b, GB18030_CHARSET)
+            "Big5" -> decodeStrict(b, BIG5_CHARSET)
+            else -> null
+        }
 
     /** Byte -> same-value codepoint mapping; the byte-fidelity fallback. */
     private fun latin1Decode(b: ByteArray): String = String(b, LATIN1_CHARSET)
