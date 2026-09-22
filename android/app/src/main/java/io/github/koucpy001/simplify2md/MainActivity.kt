@@ -254,8 +254,17 @@ class MainActivity : Activity() {
 
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain(APP_ASSETS_DOMAIN)
-            .addPathHandler("${AssetPathMapper.FRONTEND_ROUTE}/", AssetWebViewPathHandler(assets))
-            .addPathHandler("${AssetPathMapper.ASSETS_ROUTE}/", AssetWebViewPathHandler(assets))
+            // The loader strips the registered prefix before calling handle();
+            // each handler re-attaches its own prefix (see
+            // AssetWebViewPathHandler's contract note for the device finding).
+            .addPathHandler(
+                "${AssetPathMapper.FRONTEND_ROUTE}/",
+                AssetWebViewPathHandler(assets, "${AssetPathMapper.FRONTEND_ROUTE}/"),
+            )
+            .addPathHandler(
+                "${AssetPathMapper.ASSETS_ROUTE}/",
+                AssetWebViewPathHandler(assets, "${AssetPathMapper.ASSETS_ROUTE}/"),
+            )
             .addPathHandler(
                 "${MediaWebViewPathHandler.MEDIA_ROUTE}/",
                 MediaWebViewPathHandler(mediaTokens, contentResolver),

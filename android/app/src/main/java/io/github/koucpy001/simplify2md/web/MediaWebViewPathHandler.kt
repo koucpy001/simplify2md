@@ -25,7 +25,10 @@ class MediaWebViewPathHandler(
 ) : WebViewAssetLoader.PathHandler {
 
     override fun handle(path: String): WebResourceResponse? {
-        val token = path.removePrefix("$MEDIA_ROUTE/")
+        // The loader strips the registered "/media/" prefix before calling
+        // handle() (contract verified in bytecode, see AssetWebViewPathHandler):
+        // what arrives here is the bare token.
+        val token = path
         if (token.isEmpty() || token.contains('/')) return notFound()
         val entry = tokens.resolve(token) ?: return notFound()
         val stream = try {
