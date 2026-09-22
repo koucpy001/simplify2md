@@ -419,6 +419,18 @@ jobs:
             echo "value=--prerelease" >> "$GITHUB_OUTPUT"
           fi
 
+      # 幂等发布：rc 迭代会强移标签重跑，上一轮留下的 Release 对象会让 create
+      # 报 "already exists"（v0.3.0-rc1 第 4 轮即因此失败）。只删 Release 对象——
+      # 绝不带 --cleanup-tag，否则会把刚移动过的新标签一并删掉。
+      - name: Delete a stale release object (idempotent re-publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
