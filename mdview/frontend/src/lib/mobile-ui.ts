@@ -44,52 +44,6 @@ export function coerceViewModeForPhone(mode: ViewMode): ViewMode {
 }
 
 /**
- * D2: toolbar overflow grouping. The main row keeps the actions a reader needs
- * at a glance; everything else moves into the `⋯` menu. Pure data so the
- * template stays declarative and the grouping is testable.
- *
- * Main row: 打开 / 保存 / 查找 / 编辑·预览 toggle / ⋯
- * Overflow: 另存为 / 分屏 (hidden on phone by D4) / 大纲 / 暗色 / 检查更新
- */
-export interface ToolbarAction {
-  id: 'open' | 'save' | 'saveAs' | 'find' | 'outline' | 'theme' | 'update'
-}
-
-export function toolbarOverflowGrouping(isPhoneLayout: boolean): {
-  mainRow: ToolbarAction[]
-  overflow: ToolbarAction[]
-} {
-  if (isPhoneLayout) {
-    return {
-      mainRow: [
-        { id: 'open' },
-        { id: 'save' },
-        { id: 'find' },
-      ],
-      overflow: [
-        { id: 'saveAs' },
-        { id: 'outline' },
-        { id: 'theme' },
-        { id: 'update' },
-      ],
-    }
-  }
-  // Desktop: everything stays on the single main row (unchanged behaviour).
-  return {
-    mainRow: [
-      { id: 'open' },
-      { id: 'save' },
-      { id: 'saveAs' },
-      { id: 'find' },
-      { id: 'outline' },
-      { id: 'theme' },
-      { id: 'update' },
-    ],
-    overflow: [],
-  }
-}
-
-/**
  * D5: initial theme. Only when the user has never chosen (no stored value)
  * does the system preference apply; a stored choice always wins; the fallback
  * stays 'light' (historical behaviour) when neither is available.

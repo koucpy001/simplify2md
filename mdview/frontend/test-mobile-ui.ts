@@ -1,8 +1,7 @@
 // Mobile-UI decision policy gate (plan android-gui-mobile, deliverable 2).
 //
-// Covers the three pure policies extracted from App.vue:
+// Covers the pure policies extracted from App.vue:
 //   - initialViewMode / coerceViewModeForPhone (D1 + D4)
-//   - toolbarOverflowGrouping (D2)
 //   - initialTheme (D5)
 //
 // Run: npx tsx test-mobile-ui.ts
@@ -11,7 +10,6 @@ import assert from 'node:assert/strict'
 import {
   initialViewMode,
   coerceViewModeForPhone,
-  toolbarOverflowGrouping,
   initialTheme,
 } from './src/lib/mobile-ui'
 
@@ -97,36 +95,6 @@ assert.strictEqual(coerceViewModeForPhone('edit'), 'edit', "'edit' must pass thr
 assert.strictEqual(coerceViewModeForPhone('preview'), 'preview', "'preview' must pass through")
 console.log('case 8 OK: coerceViewModeForPhone       -> split coerced, others pass')
 
-// ---- toolbarOverflowGrouping (D2) --------------------------------------------
-
-const phone = toolbarOverflowGrouping(true)
-// Main row: 打开 / 保存 / 查找 (edit·preview toggle is rendered separately).
-assert.deepStrictEqual(
-  phone.mainRow.map((a) => a.id),
-  ['open', 'save', 'find'],
-  'phone main row must be open/save/find',
-)
-// Overflow: 另存为 / 大纲 / 暗色 / 检查更新 (分屏 is hidden on phone by D4).
-assert.deepStrictEqual(
-  phone.overflow.map((a) => a.id),
-  ['saveAs', 'outline', 'theme', 'update'],
-  'phone overflow must be saveAs/outline/theme/update',
-)
-// No action may appear in both groups.
-const ids = [...phone.mainRow, ...phone.overflow].map((a) => a.id)
-assert.strictEqual(new Set(ids).size, ids.length, 'no action may appear twice')
-console.log('case 9 OK: phone grouping               -> 3 main + 4 overflow, disjoint')
-
-const desktop = toolbarOverflowGrouping(false)
-// Desktop: everything on the main row, empty overflow (unchanged behaviour).
-assert.deepStrictEqual(
-  desktop.mainRow.map((a) => a.id),
-  ['open', 'save', 'saveAs', 'find', 'outline', 'theme', 'update'],
-  'desktop must keep every action on the main row',
-)
-assert.strictEqual(desktop.overflow.length, 0, 'desktop overflow must be empty')
-console.log('case 10 OK: desktop grouping            -> all main, no overflow')
-
 // ---- initialTheme (D5) --------------------------------------------------------
 
 // Stored choice always wins, even against the system preference.
@@ -140,7 +108,7 @@ assert.strictEqual(
   'light',
   "stored 'light' must win over a dark system",
 )
-console.log('case 11 OK: stored theme wins           -> dark/light honoured')
+console.log('case 9 OK: stored theme wins           -> dark/light honoured')
 
 // No stored choice: follow the system (D5).
 assert.strictEqual(
@@ -153,7 +121,7 @@ assert.strictEqual(
   'light',
   'no stored choice + light system must give light',
 )
-console.log('case 12 OK: no stored choice            -> follows system')
+console.log('case 10 OK: no stored choice            -> follows system')
 
 // No stored choice AND matchMedia unavailable -> historical 'light' fallback.
 assert.strictEqual(
@@ -161,7 +129,7 @@ assert.strictEqual(
   'light',
   'unavailable system preference must fall back to light',
 )
-console.log('case 13 OK: system pref unavailable     -> light fallback')
+console.log('case 11 OK: system pref unavailable     -> light fallback')
 
 console.log('')
-console.log('MOBILE UI OK: 13/13 cases hold.')
+console.log('MOBILE UI OK: 11/11 cases hold.')
