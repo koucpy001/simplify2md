@@ -1880,11 +1880,15 @@ html { -webkit-text-size-adjust: 100%; }
   .desktop-only { display: none; }
   /* F2: the row WRAPS the surviving controls. The former nowrap +
      overflow-x:auto row hid `⋯` off-screen (x=606) with no scroll indicator,
-     so the overflow menu could never be opened on a 360dp viewport. */
-  .toolbar { flex-wrap: wrap; overflow: visible; padding: 4px 8px; gap: 6px; }
+     so the overflow menu could never be opened on a 360dp viewport. The
+     tighter padding/gap reclaim the ~25dp needed to keep all six controls on
+     ONE row at 360dp (measured: 327.3dp row end vs 354dp inner right edge);
+     every hit target keeps its coarse-block 48x48 minimum. */
+  .toolbar { flex-wrap: wrap; overflow: visible; padding: 4px 6px; gap: 5px; }
   /* Buttons must not wrap their CJK labels into vertical stacks: each label
-     stays on one line at its full 48dp hit target and the row wraps instead. */
-  .toolbar button { white-space: nowrap; flex: 0 0 auto; }
+     stays on one line at its full 48dp hit target and the row wraps instead
+     when the viewport is too narrow (e.g. 320dp). */
+  .toolbar button { white-space: nowrap; flex: 0 0 auto; padding: 8px 11px; }
   /* F3/F4/F5: enc / path / stats / status wrap onto their own trailing line.
      Hiding .status made errors silent and hiding .enc contradicted the
      Android README (iso-8859-1 is documented as visible here); squeezing
