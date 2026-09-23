@@ -43,6 +43,13 @@ import {
   IME_HEIGHT_CSS_VAR,
   type OpenTextPayload,
 } from './lib/bridge-events'
+import {
+  initialViewMode,
+  coerceViewModeForPhone,
+  initialTheme,
+  type ViewMode,
+  type Theme,
+} from './lib/mobile-ui'
 
 const source = ref('')
 const filePath = ref('')
@@ -252,13 +259,52 @@ function releaseStartupHold() {
 }
 
 // View mode / outline / theme, persisted per-app via localStorage.
-type ViewMode = 'split' | 'edit' | 'preview'
-type Theme = 'light' | 'dark'
-const viewMode = ref<ViewMode>((localStorage.getItem('mdview.viewMode') as ViewMode) || 'split')
+// Mobile adaptation (plan android-gui-mobile): the initial values and the
+// split-mode guard are decided by the pure policies in lib/mobile-ui.ts.
+// `isPhone` mirrors the CSS breakpoint (@media max-width: 640px). It is a
+// REACTIVE ref driven by matchMedia, not a plain function: the template reads
+// it (drawer class, scrim, click routing), so a resize / rotation must
+// re-render the JS side or it silently disagrees with the CSS breakpoint.
+const MOBILE_BREAKPOINT = 640
+const phoneMediaQuery =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`)
+    : null
+const isPhone = ref<boolean>(
+  phoneMediaQuery
+    ? phoneMediaQuery.matches
+    : typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT,
+)
+function onPhoneMediaChange(e: MediaQueryListEvent) {
+  isPhone.value = e.matches
+  // A live 'split' must never survive into a phone layout (D4).
+  if (isPhone.value && viewMode.value === 'split') viewMode.value = 'preview'
+}
+const viewMode = ref<ViewMode>(
+  initialViewMode({ isPhoneLayout: isPhone.value, stored: localStorage.getItem('mdview.viewMode') }),
+)
 const outlineVisible = ref(localStorage.getItem('mdview.outline') === '1')
-const theme = ref<Theme>((localStorage.getItem('mdview.theme') as Theme) || 'light')
+// D5: theme follows the system when the user has never chosen; a stored
+// choice always wins; matchMedia-unavailable falls back to 'light'.
+const theme = ref<Theme>(
+  initialTheme({
+    stored: localStorage.getItem('mdview.theme'),
+    systemPrefersDark:
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-color-scheme: dark)').matches
+        : null,
+  }),
+)
 const outline = ref<OutlineItem[]>([])
 let scrollLockUntil = 0
+
+// D4: on a phone layout 'split' is never allowed. The watch coerces a live
+// 'split' (restored preference, or a resize from tablet to phone width) back
+// to 'preview' BEFORE the persistence watcher runs, so the stored value is
+// replaced by the user's own later choice, never by the forced default.
+watch(viewMode, (v) => {
+  if (isPhone.value && v === 'split') viewMode.value = coerceViewModeForPhone(v)
+})
 
 watch(viewMode, (v) => {
   try { localStorage.setItem('mdview.viewMode', v) } catch { /* ignore */ }
@@ -266,10 +312,41 @@ watch(viewMode, (v) => {
   if (v !== 'preview' && editorView) nextTick(() => editorView?.requestMeasure())
 })
 watch(outlineVisible, (v) => { try { localStorage.setItem('mdview.outline', v ? '1' : '0') } catch { /* ignore */ } })
+// D4: a resize across the 640px breakpoint re-checks the split guard (a
+// tablet-width session that stored 'split' must not break after shrinking).
+// The ref is re-synced here too, so the layout flag is correct regardless of
+// whether the matchMedia change event or the resize event fires first.
+function onWindowResize() {
+  if (phoneMediaQuery) isPhone.value = phoneMediaQuery.matches
+  if (isPhone.value && viewMode.value === 'split') viewMode.value = 'preview'
+}
 watch(theme, (v) => {
   try { localStorage.setItem('mdview.theme', v) } catch { /* ignore */ }
   if (editorView) setEditorHighlight(editorView, v === 'dark')
 })
+
+// ---- mobile adaptation state (plan android-gui-mobile) ----
+// D2: the `⋯` overflow menu. Desktop never renders it (CSS hides the button
+// and the menu below 640px only), so desktop behaviour is unchanged.
+const overflowMenuOpen = ref(false)
+function closeOverflowMenu() {
+  overflowMenuOpen.value = false
+}
+function toggleOverflowMenu() {
+  overflowMenuOpen.value = !overflowMenuOpen.value
+}
+// D3: on a phone the outline is an overlay drawer; clicking an entry closes it
+// so the reader lands back on the content. Desktop keeps the docked column.
+function gotoOutlineMobile(o: OutlineItem) {
+  gotoOutline(o)
+  if (isPhone.value) outlineVisible.value = false
+}
+// D4: the 分屏 button is hidden on phones; clicking it is impossible there,
+// but the guard keeps any other path (e.g. a stale stored value) safe too.
+function setViewMode(mode: ViewMode) {
+  if (isPhone.value && mode === 'split') mode = coerceViewModeForPhone(mode)
+  viewMode.value = mode
+}
 
 // ---- find ----
 const findVisible = ref(false)
@@ -1409,6 +1486,14 @@ onMounted(async () => {
   const envProblem = probeDomEnvironment(window)
   if (envProblem) status.value = envProblem
   window.addEventListener('keydown', onKeydown)
+  // D4: track the 640px breakpoint so a resize can never leave a phone in
+  // split mode (see onWindowResize). matchMedia is the authoritative source;
+  // the listener keeps the reactive flag in sync on rotation / window resize.
+  if (phoneMediaQuery) {
+    isPhone.value = phoneMediaQuery.matches
+    phoneMediaQuery.addEventListener('change', onPhoneMediaChange)
+  }
+  window.addEventListener('resize', onWindowResize)
   if (editorHost.value) {
     editorView = createMarkdownEditor(editorHost.value, source.value, theme.value === 'dark', (t) => {
       source.value = t
@@ -1481,6 +1566,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', onWindowResize)
+  phoneMediaQuery?.removeEventListener('change', onPhoneMediaChange)
   imageObserver?.disconnect()
   imageObserver = null
   if (editorView) {
@@ -1500,30 +1587,56 @@ onBeforeUnmount(() => {
     <div class="toolbar">
       <button @click="open">打开</button>
       <button @click="save">保存</button>
-      <button @click="saveAs">另存为</button>
+      <!-- D2: the ONLY mobile-only control in the row is the `⋯` overflow entry
+           (below). 另存为 / 大纲 / 暗色 / 检查更新 exist exactly once on phones:
+           as items inside .overflow-menu. Desktop keeps the inline
+           .desktop-only copies and never renders the `⋯` wrapper. 分屏 is
+           hidden on phones entirely (D4) — it stays inline on desktop. -->
       <!-- Touch entry for find (todo 16): desktop keeps Ctrl+F; this reuses openFind(). -->
       <button @click="openFind">查找</button>
       <span class="seg">
-        <button :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
-        <button :class="{ active: viewMode === 'split' }" @click="viewMode = 'split'">分屏</button>
-        <button :class="{ active: viewMode === 'preview' }" @click="viewMode = 'preview'">预览</button>
+        <button :class="{ active: viewMode === 'edit' }" @click="setViewMode('edit')">编辑</button>
+        <!-- D4: split is desktop/tablet only; the button is hidden < 640px. -->
+        <button class="split-btn" :class="{ active: viewMode === 'split' }" @click="setViewMode('split')">分屏</button>
+        <button :class="{ active: viewMode === 'preview' }" @click="setViewMode('preview')">预览</button>
       </span>
-      <button :class="{ active: outlineVisible }" @click="outlineVisible = !outlineVisible">大纲</button>
-      <button @click="theme = theme === 'dark' ? 'light' : 'dark'">
+      <button class="desktop-only" :class="{ active: outlineVisible }" @click="outlineVisible = !outlineVisible">大纲</button>
+      <button class="desktop-only" @click="theme = theme === 'dark' ? 'light' : 'dark'">
         {{ theme === 'dark' ? '亮色' : '暗色' }}
       </button>
-      <button :disabled="checkingUpdate" @click="manualCheckUpdate">
+      <button class="desktop-only" :disabled="checkingUpdate" @click="manualCheckUpdate">
         {{ checkingUpdate ? '检查中…' : '检查更新' }}
       </button>
+      <!-- D2: `⋯` overflow menu, phones only (CSS-scoped). -->
+      <div class="overflow-wrap mobile-only">
+        <button class="overflow-btn" :class="{ active: overflowMenuOpen }" title="更多" @click="toggleOverflowMenu">⋯</button>
+        <div v-if="overflowMenuOpen" class="overflow-menu">
+          <button @click="saveAs(); closeOverflowMenu()">另存为</button>
+          <button :class="{ active: outlineVisible }" @click="outlineVisible = !outlineVisible; closeOverflowMenu()">大纲</button>
+          <button @click="theme = theme === 'dark' ? 'light' : 'dark'; closeOverflowMenu()">
+            {{ theme === 'dark' ? '亮色' : '暗色' }}
+          </button>
+          <button :disabled="checkingUpdate" @click="manualCheckUpdate(); closeOverflowMenu()">
+            {{ checkingUpdate ? '检查中…' : '检查更新' }}
+          </button>
+        </div>
+      </div>
       <select v-if="recents.length" class="recents" @change="onRecentChange">
         <option disabled selected>最近文件</option>
         <option v-for="entry in recents" :key="entry.id" :value="entry.id">{{ entry.name }}</option>
         <option value="__clear__">清空记录</option>
       </select>
-      <span class="enc">{{ fileEnc }}</span>
-      <span class="path"><span v-if="dirty" class="dirty-dot">● </span>{{ displayPath }}</span>
-      <span class="stats">{{ stats.words }} 字 · {{ stats.chars }} 字符</span>
-      <span class="status">{{ status }}</span>
+      <!-- Trailing info line (F3/F4/F5): on desktop .statusline is
+           `display: contents`, so enc/path/stats/status stay direct flex items
+           of .toolbar exactly as before. On phones it wraps to its own line so
+           the feedback channel (.status) and the byte-fidelity encoding label
+           (.enc) stay visible while .path gets real width. -->
+      <span class="statusline">
+        <span class="enc">{{ fileEnc }}</span>
+        <span class="path"><span v-if="dirty" class="dirty-dot">● </span>{{ displayPath }}</span>
+        <span class="stats">{{ stats.words }} 字 · {{ stats.chars }} 字符</span>
+        <span class="status">{{ status }}</span>
+      </span>
       <!-- Reading progress: hidden in edit mode (no preview scrolling there). -->
       <div v-if="viewMode !== 'edit'" class="progress-track">
         <div class="progress-bar" :style="{ width: progressPct + '%' }"></div>
@@ -1557,7 +1670,12 @@ onBeforeUnmount(() => {
         @click="onPreviewClick"
         @scroll="onPreviewScroll"
       ></div>
-      <div v-if="outlineVisible" class="outline">
+      <!-- D3: on phones the outline is an overlay drawer (CSS turns the docked
+           column into a fixed right-side drawer with a scrim); clicking an
+           entry closes it via gotoOutlineMobile. Desktop keeps the docked
+           column and the plain gotoOutline. -->
+      <div v-if="outlineVisible && isPhone" class="outline-mask" @click="outlineVisible = false"></div>
+      <div v-if="outlineVisible" class="outline" :class="{ 'outline-drawer': isPhone }">
         <div class="outline-title">大纲</div>
         <div v-if="!outline.length" class="outline-empty">（无标题）</div>
         <div
@@ -1566,7 +1684,7 @@ onBeforeUnmount(() => {
           class="outline-item"
           :class="['lv' + vo.item.level, { active: vo.item.line === activeOutlineLine }]"
           :style="{ paddingLeft: (vo.item.level - 1) * 14 + 8 + 'px' }"
-          @click="gotoOutline(vo.item)"
+          @click="isPhone ? gotoOutlineMobile(vo.item) : gotoOutline(vo.item)"
         ><span
             v-if="outlineHasChildren(vo.idx)"
             class="outline-arrow"
@@ -1674,6 +1792,18 @@ onBeforeUnmount(() => {
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+/* Mobile defect #11 (plan android-gui-mobile): WebView text inflation, tap
+   flash and pull-to-refresh chain-scrolling. All three are no-ops on desktop
+   WebView2 (it ignores -webkit-text-size-adjust at these values and has no
+   touch scrolling), so desktop rendering is unchanged. */
+html { -webkit-text-size-adjust: 100%; }
+.app { -webkit-tap-highlight-color: transparent; }
+.editor, .preview, .outline { overscroll-behavior: contain; }
+/* D2 helper classes: the same buttons exist once in the template; CSS decides
+   which copy is visible per layout. Desktop shows .desktop-only, phones show
+   .mobile-only — scoped below so neither leaks. */
+.mobile-only { display: none; }
+.desktop-only { display: inline-flex; }
 .toolbar { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .toolbar button { padding: 4px 12px; cursor: pointer; background: var(--input-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
 .toolbar button.active { background: var(--accent); border-color: var(--accent-border); }
@@ -1694,6 +1824,11 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 .toolbar .dirty-dot { color: #e8a13c; }
 .toolbar .stats { font-size: 12px; color: var(--faint); }
 .toolbar .status { margin-left: auto; font-size: 12px; color: var(--ok); }
+/* Trailing-info wrapper (F3/F4/F5). Desktop: `display: contents` removes the
+   wrapper's own box, so enc/path/stats/status stay direct flex items of
+   .toolbar and desktop layout is unchanged. Phones turn it into a flex line
+   (see the 640px block below). */
+.statusline { display: contents; }
 .main { flex: 1; display: flex; overflow: hidden; }
 .editor { flex: 1 1 0; min-width: 0; height: 100%; border: none; border-right: 1px solid var(--border); outline: none; overflow: hidden; background: var(--bg); color: var(--fg); }
 .editor .cm-editor { height: 100%; }
@@ -1729,6 +1864,90 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
   /* Negative-margin trick: the arrow's hit area stretches to the full 48dp row
      height without changing the row's layout flow. */
   .outline-arrow { width: 32px; padding: 15px 0; margin: -15px 0; }
+}
+
+/* ==========================================================================
+   Mobile adaptation (plan android-gui-mobile). EVERY rule below is scoped to
+   @media (max-width: 640px) — the same breakpoint lib/mobile-ui.ts uses — or
+   extends the existing @media (pointer: coarse) block above. Desktop
+   (pointer: fine, >= 640px) renders exactly as before this block existed.
+   ========================================================================== */
+@media (max-width: 640px) {
+  /* D2: the `⋯` wrapper is the row's only .mobile-only control; the
+     另存为/大纲/暗色/检查更新 copies live inside its menu. The desktop-only
+     inline copies disappear. */
+  .mobile-only { display: inline-flex; }
+  .desktop-only { display: none; }
+  /* F2: the row WRAPS the surviving controls. The former nowrap +
+     overflow-x:auto row hid `⋯` off-screen (x=606) with no scroll indicator,
+     so the overflow menu could never be opened on a 360dp viewport. */
+  .toolbar { flex-wrap: wrap; overflow: visible; padding: 4px 8px; gap: 6px; }
+  /* Buttons must not wrap their CJK labels into vertical stacks: each label
+     stays on one line at its full 48dp hit target and the row wraps instead. */
+  .toolbar button { white-space: nowrap; flex: 0 0 auto; }
+  /* F3/F4/F5: enc / path / stats / status wrap onto their own trailing line.
+     Hiding .status made errors silent and hiding .enc contradicted the
+     Android README (iso-8859-1 is documented as visible here); squeezing
+     .path to width 0 hid the filename. All four stay visible instead. */
+  .statusline { display: flex; flex: 1 1 100%; align-items: center; gap: 8px; min-width: 0; }
+  .toolbar .enc, .toolbar .stats { flex: 0 0 auto; }
+  .toolbar .path { flex: 1 1 auto; min-width: 0; max-width: 100%; }
+  /* A long status line ellipsizes instead of stretching the toolbar. */
+  .toolbar .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* D2: the `⋯` overflow menu. It positions against .toolbar (the wrapper is
+     static, NOT relative) so it always opens flush with the toolbar's right
+     edge. This matters because the wrapped `⋯` entry starts its row at x=8 on
+     a 360dp viewport: a wrapper-anchored menu would render at x=-72 with every
+     label off-screen to the left. Toolbar anchoring is off-screen at no width
+     (min-width 128 < smallest phone width). It is never wider than the
+     viewport either. */
+  .overflow-wrap { display: inline-flex; }
+  .overflow-btn { font-size: 16px; line-height: 1; }
+  .overflow-menu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 70;
+    display: flex; flex-direction: column; min-width: 128px;
+    max-width: calc(100vw - 16px);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.18); padding: 4px;
+  }
+  .overflow-menu button { border: none; background: transparent; text-align: left; padding: 10px 12px; border-radius: 4px; }
+  .overflow-menu button.active { background: var(--accent); }
+  /* D4: the 分屏 button never renders on a phone. */
+  .split-btn { display: none; }
+  /* Defect #4: the findbar's natural width (410dp) exceeds a 360dp viewport.
+     Reflow it into a full-width bar docked under the toolbar instead of the
+     floating right-anchored popover. */
+  .findbar { position: fixed; top: auto; left: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; border-left: none; border-right: none; border-bottom: none; }
+  .findbar input { flex: 1 1 auto; width: auto; min-width: 0; }
+  /* Defect #9: 20px 28px padding wastes 56dp of 360dp horizontally. */
+  .preview { padding: 12px 14px; }
+  /* Defect #5: wide tables must be horizontally reachable. The preview pane
+     itself scrolls (overflow:auto), but a table wider than the pane must not
+     stretch the pane's layout: wrap-level scroll containment on the table. */
+  .preview table { display: block; overflow-x: auto; max-width: 100%; }
+  /* Defect #6: modals must fit the viewport. */
+  .modal { width: calc(100vw - 24px); max-width: 380px; max-height: calc(100vh - 48px); overflow: auto; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions button { flex: 1 1 auto; }
+  /* D3: the outline becomes a right-side overlay drawer with a scrim; it no
+     longer participates in the flex row, so the content column keeps its
+     full width. */
+  .outline-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 80; }
+  .outline-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 90;
+    width: min(280px, 80vw); flex: none;
+    box-shadow: -4px 0 16px rgba(0,0,0,.2);
+  }
+}
+
+/* Touch accessibility (defects #6/#7 + plan acceptance): on coarse-pointer
+   devices the modal buttons reach the 48dp minimum and the code copy button
+   is always visible (there is no hover on touch). Extends — never replaces —
+   the existing coarse block above. */
+@media (pointer: coarse) {
+  .modal-actions button { min-height: 48px; }
+  .preview .copy-btn { opacity: 1; }
+  .overflow-menu button { min-height: 48px; }
 }
 .preview h1, .preview h2, .preview h3 { line-height: 1.3; }
 .preview img { max-width: 100%; height: auto; }
