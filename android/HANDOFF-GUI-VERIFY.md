@@ -1,8 +1,8 @@
 # Android GUI 移动化 — Windows 端验证交接
 
 > 手机端 GUI 已按移动优先重建：工具栏单行 + `⋯` 溢出菜单、手机默认预览、大纲改覆盖式抽屉、
-> 状态行（文件名/编码/字数/状态提示）与触屏可达性修复。代码**已在本地 `main` 提交，但未推送**
-> （`origin/main` 之后的提交清单见 §0；数量以 `git log --oneline origin/main..HEAD` 的真实输出为准，本交接文档自身也在其中）。
+> 状态行（文件名/编码/字数/状态提示）与触屏可达性修复。代码已于 **2026-09-23 推送**，
+> `origin/main` HEAD = **`e669a6b`**（与本地 `main` 完全同步）；**win 端只需 `git pull --ff-only origin main`**，提交清单与注意事项见 §0。
 > **win 端要做的事**：拉取 → 构建带新前端产物的 APK → 真机跑 F3 端到端 → 顺手复测桌面 WebView2。
 > 本文只列 **Linux 侧做不到** 的部分；Linux 侧已完成的实测见 `.omo/evidence/android-gui-mobile.md`。
 
@@ -19,9 +19,9 @@
 
 ---
 
-## 0. 前置条件（推送 / 拉取）
+## 0. 前置条件（拉取）
 
-本地 `main` 比 `origin/main` 领先 **7 个提交**（截至 `de0cdc9`，含该提交本身）。**本交接文档自身的修订提交会再 +1，因此数量以 `git log --oneline origin/main..HEAD` 的真实输出为准**；下表列出截至 `de0cdc9` 的全部条目（仓库约定：推送需要用户显式授权，编排者未推）。
+推送已于 **2026-09-23** 完成（用户显式授权），`origin/main` HEAD = **`e669a6b`**，与本地 `main` 完全同步。本次推送共 **9 个提交**（`34bb9b3..e669a6b`），下表按顺序列出（数量已冻结为事实；若日后提交继续前进，以 `git rev-parse --short HEAD` 与 `git log --oneline origin/main..HEAD` 的真实输出为准）。
 
 | # | commit | 主题 |
 |---|---|---|
@@ -32,15 +32,21 @@
 | 5 | `2b4b8ff` | fix(frontend): make the phone status line and update-tip dismiss target usable |
 | 6 | `2d89b5c` | chore(frontend): drop the unused toolbar-grouping policy and its tests |
 | 7 | `de0cdc9` | docs(android): hand the device/Gradle/Windows verification over to the Windows side |
+| 8 | `0f27de4` | docs(android): make the handoff commit count self-correcting |
+| 9 | `e669a6b` | docs(android): add the missing event/link and backup-retention device criteria |
 
 ```bash
 # Windows 端（PowerShell 或 Git Bash）
 cd <repo>
-git pull --ff-only origin main              # 若远端尚无这些提交，则由本机 push 后在其他机器拉取
-git log --oneline origin/main..HEAD         # 本机领先的提交；应看到上表全部行（含本交接文档自身）
+git pull --ff-only origin main              # 拉取已完成的 9 个提交推送
+git log --oneline origin/main..HEAD         # 期望输出为空 = 已同步；若非空，说明 pull 未生效（或存在本地私提交）
+git rev-parse --short HEAD                  # 期望 e669a6b
 ```
 
-**推送前隐私扫描已复跑为空**：在 `2d89b5c` 上执行（更早的 `2b4b8ff` 同样为空）。操作方可自行复跑：
+> ⚠️ **最容易犯的错误**：已发布的 `v0.3.0-rc1` release APK 是用**旧代码**（`61368ef`）构建的，
+> **不含**本次 GUI 修复；必须按 §1 用新代码重新构建并安装，否则真机上看到的仍是旧的手机界面。
+
+**推送前隐私扫描已复跑为空**：推送前立即在 `e669a6b` 上执行，下列三条均为空。操作方可自行复跑：
 
 ```bash
 # 计划指定的两条（均应无输出）
@@ -210,7 +216,7 @@ wails build
 
 ## 6. 回报清单
 
-1. `origin/main` 之后全部提交的推送结果（截至 `de0cdc9` 为 7 个，含本交接文档；以 `git log --oneline origin/main..HEAD` 为准）；
+1. `git pull --ff-only origin main` 与 `git rev-parse --short HEAD` 的结果（期望 `e669a6b`；若 HEAD 不同，说明拉取到了更新的提交，以真实输出为准）；
 2. 新 APK 的 `apksigner verify --print-certs` 输出（确认证书 DN 不含 `CN=Android Debug`）；
 3. §2 门禁原始输出（含 Kotlin 测试 totals 与 lint error/warning 计数）；
 4. §3 真机结果：逐条 + 设备型号 + Android 版本（§3(a) 的 8 条与 §3(b) 的 ⭐ 四条优先）；
