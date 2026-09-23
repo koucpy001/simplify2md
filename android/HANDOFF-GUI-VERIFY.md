@@ -1,8 +1,8 @@
 # Android GUI 移动化 — Windows 端验证交接
 
 > 手机端 GUI 已按移动优先重建：工具栏单行 + `⋯` 溢出菜单、手机默认预览、大纲改覆盖式抽屉、
-> 状态行（文件名/编码/字数/状态提示）与触屏可达性修复。代码已于 **2026-09-23 推送**，
-> `origin/main` HEAD = **`e669a6b`**（与本地 `main` 完全同步）；**win 端只需 `git pull --ff-only origin main`**，提交清单与注意事项见 §0。
+> 状态行（文件名/编码/字数/状态提示）与触屏可达性修复。代码（含本交接文档自身）已于 **2026-09-23 推送**；
+> **win 端只需 `git pull --ff-only origin main`**，提交清单与注意事项见 §0。
 > **win 端要做的事**：拉取 → 构建带新前端产物的 APK → 真机跑 F3 端到端 → 顺手复测桌面 WebView2。
 > 本文只列 **Linux 侧做不到** 的部分；Linux 侧已完成的实测见 `.omo/evidence/android-gui-mobile.md`。
 
@@ -21,7 +21,7 @@
 
 ## 0. 前置条件（拉取）
 
-推送已于 **2026-09-23** 完成（用户显式授权），`origin/main` HEAD = **`e669a6b`**，与本地 `main` 完全同步。本次推送共 **9 个提交**（`34bb9b3..e669a6b`），下表按顺序列出（数量已冻结为事实；若日后提交继续前进，以 `git rev-parse --short HEAD` 与 `git log --oneline origin/main..HEAD` 的真实输出为准）。
+推送已于 **2026-09-23** 完成（用户显式授权），`origin/main` 与本地 `main` 完全同步。下表是**本次 GUI 化所包含的 9 个提交**（`34bb9b3..e669a6b`，历史事实，按顺序）。**本交接文档自身的推送状态修订提交（`70fd9dc`）在该表之后一并推送，因此远端 HEAD 会比表中末条更新——这是正常的，不是异常。**
 
 | # | commit | 主题 |
 |---|---|---|
@@ -38,9 +38,9 @@
 ```bash
 # Windows 端（PowerShell 或 Git Bash）
 cd <repo>
-git pull --ff-only origin main              # 拉取已完成的 9 个提交推送
+git pull --ff-only origin main              # 拉取远端 main（含下表 9 个 GUI 提交及其后的文档修订）
 git log --oneline origin/main..HEAD         # 期望输出为空 = 已同步；若非空，说明 pull 未生效（或存在本地私提交）
-git rev-parse --short HEAD                  # 期望 e669a6b
+git merge-base --is-ancestor e669a6b HEAD && echo "已包含全部 GUI 修复"   # 断言 e669a6b 是 HEAD 的祖先（不要求 HEAD 等于任何哈希）
 ```
 
 > ⚠️ **最容易犯的错误**：已发布的 `v0.3.0-rc1` release APK 是用**旧代码**（`61368ef`）构建的，
@@ -216,7 +216,7 @@ wails build
 
 ## 6. 回报清单
 
-1. `git pull --ff-only origin main` 与 `git rev-parse --short HEAD` 的结果（期望 `e669a6b`；若 HEAD 不同，说明拉取到了更新的提交，以真实输出为准）；
+1. `git log --oneline -1` 的输出，以及 `git log --oneline origin/main..HEAD` 是否为空（空 = 已同步）；**HEAD 比 `e669a6b` 更新是正常的**（其后的文档修订也在远端），只要 `e669a6b` 是 HEAD 的祖先（`git merge-base --is-ancestor e669a6b HEAD`）就说明 GUI 修复齐全；
 2. 新 APK 的 `apksigner verify --print-certs` 输出（确认证书 DN 不含 `CN=Android Debug`）；
 3. §2 门禁原始输出（含 Kotlin 测试 totals 与 lint error/warning 计数）；
 4. §3 真机结果：逐条 + 设备型号 + Android 版本（§3(a) 的 8 条与 §3(b) 的 ⭐ 四条优先）；
