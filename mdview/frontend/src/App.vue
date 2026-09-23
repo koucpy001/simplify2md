@@ -1587,11 +1587,12 @@ onBeforeUnmount(() => {
     <div class="toolbar">
       <button @click="open">打开</button>
       <button @click="save">保存</button>
-      <!-- D2: the ONLY mobile-only control in the row is the `⋯` overflow entry
-           (below). 另存为 / 大纲 / 暗色 / 检查更新 exist exactly once on phones:
-           as items inside .overflow-menu. Desktop keeps the inline
-           .desktop-only copies and never renders the `⋯` wrapper. 分屏 is
-           hidden on phones entirely (D4) — it stays inline on desktop. -->
+      <!-- Desktop keeps its inline 另存为 exactly where the pre-change template
+           had it (between 保存 and 查找). Phones hide it via .desktop-only and
+           get it from the `⋯` overflow menu, which holds 另存为 / 大纲 / 暗色 /
+           检查更新; the `⋯` wrapper itself is mobile-only. 分屏 is hidden on
+           phones entirely (D4) — it stays inline on desktop. -->
+      <button class="desktop-only" @click="saveAs">另存为</button>
       <!-- Touch entry for find (todo 16): desktop keeps Ctrl+F; this reuses openFind(). -->
       <button @click="openFind">查找</button>
       <span class="seg">
@@ -1950,7 +1951,11 @@ html { -webkit-text-size-adjust: 100%; }
    the existing coarse block above. */
 @media (pointer: coarse) {
   .modal-actions button { min-height: 48px; }
-  .preview .copy-btn { opacity: 1; }
+  /* Specificity (0,2,1) so this beats the later base rule `.preview .copy-btn
+     { opacity: 0 }` (0,2,0) regardless of source order — a tie would otherwise
+     be won by the base rule, since it appears AFTER this block. The button is
+     injected as a child of <pre> (injectCopyButtons), so `pre` is valid. */
+  .preview pre .copy-btn { opacity: 1; }
   .overflow-menu button { min-height: 48px; }
 }
 .preview h1, .preview h2, .preview h3 { line-height: 1.3; }
