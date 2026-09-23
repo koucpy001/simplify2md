@@ -1865,6 +1865,13 @@ html { -webkit-text-size-adjust: 100%; }
   /* Negative-margin trick: the arrow's hit area stretches to the full 48dp row
      height without changing the row's layout flow. */
   .outline-arrow { width: 32px; padding: 15px 0; margin: -15px 0; }
+  /* Update-tip dismiss (stress test): the ✕ glyph is ~10x14dp and a mistap next
+     to it opens the download page instead of dismissing (the banner itself is
+     clickable; the close button uses @click.stop). Same negative-margin trick:
+     vertical padding lifts the hit box to 44dp tall, `min-width: 44px` widens
+     it, and the -11px side margins reclaim the min-width growth so the banner's
+     height (28dp) and the button's flow width are unchanged. */
+  .update-tip-close { padding: 15px 6px; margin: -15px -11px; min-width: 44px; }
 }
 
 /* ==========================================================================
@@ -1895,10 +1902,14 @@ html { -webkit-text-size-adjust: 100%; }
      Android README (iso-8859-1 is documented as visible here); squeezing
      .path to width 0 hid the filename. All four stay visible instead. */
   .statusline { display: flex; flex: 1 1 100%; align-items: center; gap: 8px; min-width: 0; }
-  .toolbar .enc, .toolbar .stats { flex: 0 0 auto; }
+  .toolbar .enc { flex: 0 0 auto; }
+  /* .path stays shrinkable as it was. */
   .toolbar .path { flex: 1 1 auto; min-width: 0; max-width: 100%; }
-  /* A long status line ellipsizes instead of stretching the toolbar. */
-  .toolbar .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Worst-case content: .stats (word/char count, the least important element)
+     yields the space first and ellipsizes; .status (the app's ONLY feedback
+     channel) grows into the free space and never drops below 72dp. */
+  .toolbar .stats { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar .status { flex: 1 1 auto; min-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* D2: the `⋯` overflow menu. It positions against .toolbar (the wrapper is
      static, NOT relative) so it always opens flush with the toolbar's right
      edge. This matters because the wrapped `⋯` entry starts its row at x=8 on
