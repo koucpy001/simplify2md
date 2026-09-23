@@ -15,7 +15,7 @@
 - **三种视图**：编辑 / 分屏（双向滚动同步）/ 预览
 - **文内查找**：Ctrl+F 匹配计数，编辑区选中定位 + 预览黄色高亮，F3 循环跳转
 - **大纲导航**：标题抽取，点击直达，随阅读位置高亮当前标题
-- **编码与换行保真**：自动识别 UTF-8 / GB18030 / Big5，CRLF / LF 按原样写回，不损坏老文件；保存采用临时文件 + 原子替换，中途崩溃也不会写坏原文
+- **编码与换行保真**：自动识别 UTF-8 / GB18030 / Big5，CRLF / LF 按原样写回，不损坏老文件；保存采用临时文件 + 原子替换（该承诺仅适用于 Windows；Android 端为"写入失败回滚 + 启动对账恢复"，见下文 Android 章节），中途崩溃也不会写坏原文
 - **文件关联与单实例**：双击 `.md` / `.markdown` 在已有窗口打开；应用外修改自动重载，有未保存改动时弹窗询问
 - **暗色主题 · 字数统计 · 最近文件与启动恢复 · 未保存关闭守卫**
 - **应用内更新检查**：启动自动检查 + 手动触发，区分"网络失败"与"已是最新"
@@ -48,6 +48,51 @@ WebView2 运行时 Windows 10/11 自带；缺失时安装版会自动补装。
 | `Ctrl+F` | 查找（`Enter` 下一个、`Shift+Enter` 上一个） |
 | `F3` / `Shift+F3` | 下一个 / 上一个匹配 |
 | `Esc` | 关闭查找 / 取消弹窗 |
+
+## Android 版
+
+同一份 Vue 前端跑在原生 Kotlin + WebView 外壳里，渲染/编辑管线与 Windows 版一致。
+平台细节见 [android/README.md](android/README.md)。
+
+### 安装
+
+从 [Releases](../../releases) 页面下载 APK（如 `simplify2md-<tag>.apk`）直接安装。
+APK 使用非调试证书签名（自签，`CN=simplify2md`，有效期至 2054 年），安装时如遇未知来源提示，允许即可。
+
+### 权限
+
+应用只申请两类权限，Manifest 中可逐条核对：
+
+- `INTERNET`：仅用于启动时的更新检查（GitHub Releases API）；
+- SAF 文档访问：打开 / 保存文件时由系统文件选择器按次授权，无存储权限、无安装应用权限、无"所有文件访问"。
+
+### 与 Windows 版的差异（限制）
+
+- **不提供原子替换**：SAF 文档 URI 无法做"临时文件 + rename 覆盖"，Android 只有"写入失败回滚 + 启动对账恢复"；上文特性区的原子替换承诺仅适用于 Windows。
+- **无实时外部变更检测**：桌面用 fsnotify 监听文件，Android 在每次回到前台时重读一次；有未保存改动时弹窗询问，绝不自动覆盖。
+- **`.md` 文件关联依赖 MIME**：部分第三方文件管理器（MIUI / ColorOS / EMUI 等）的"打开方式"列表可能不提供本应用，可改用系统文件选择器打开。
+- **`Download/` 等目录无法整体授权**：相对图片依赖对所在文件夹的一次性树授权，且树内相对解析仅对本地存储类 provider 有效，云盘等 provider 显示占位图。
+- **更新需手动下载安装**：应用内检查只提示并跳转下载页，不会自动下载或安装。
+- **编码差异**：字节保真回退在 Android 界面显示为 `iso-8859-1`（桌面显示 `utf-8`）；在字节保真文档中键入非 Latin-1 字符（中文 / emoji）时会提示"另存为 UTF-8"，桌面则直接写成 UTF-8 字节、不提示。
+
+### 从源码构建
+
+环境要求：JDK 21、Android SDK 36。
+
+```bash
+cd android
+./gradlew :app:assembleRelease
+```
+
+### 签名 Secret 清单
+
+Release APK 的签名材料只经 GitHub Secrets 注入（仓库零密钥），需配置以下 4 个名字，
+值在仓库的 [Secrets 设置页](../../settings/secrets/actions) 配置，本文档不记录任何值：
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
 
 ## 从源码构建
 
