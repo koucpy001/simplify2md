@@ -73,12 +73,26 @@ jobs:
             echo ""
             echo "## 更新内容"
             echo ""
-            prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
-            if [ -n "$prev" ]; then
-              git log --pretty=format:'- %s' "$prev..$GITHUB_REF_NAME"
+            # 正式版（tag 不含 "-"）必须以最近一个正式版为基线：--exclude='*-*' 排除 rc 等
+            # 预发布标签，否则 v0.3.0 的更新内容会退化成 v0.3.0-rc2..v0.3.0 的几行内部提交；
+            # 预发布版保持原行为（取任意最近标签），rc 迭代之间的增量才有意义。
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
             else
-              git log --pretty=format:'- %s' "$GITHUB_REF_NAME"
+              prev=$(git describe --tags --abbrev=0 --exclude='*-*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)
             fi
+            if [ -n "$prev" ]; then
+              range="$prev..$GITHUB_REF_NAME"
+            else
+              range="$GITHUB_REF_NAME"
+            fi
+            # 公开更新内容只列面向用户的 feat/fix/perf；grep 无匹配时退出码为 1，
+            # 用 || true 兜底后显式判空，避免全 docs/chore 的版本因 -e 丢掉整段。
+            commits=$(git log --pretty=format:'- %s' "$range" | grep -E '^- (feat|fix|perf)(\(|:)' || true)
+            if [ -z "$commits" ]; then
+              commits=$(git log --pretty=format:'- %s' "$range")
+            fi
+            printf '%s\n' "$commits"
           } > release-notes.md
 
       # 上传前先平铺到统一 staging 目录：upload-artifact@v4 对多个不同层级的路径
