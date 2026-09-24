@@ -1,23 +1,25 @@
-# Vue 3 + TypeScript + Vite
+# mdview/frontend
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue
-3 `<script setup>` SFCs, check out
-the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+`simplify2md` 的前端（Vue 3 + TypeScript + Vite）：Wails 桌面版与 Android WebView 外壳共用同一份界面与渲染/编辑逻辑。
 
-## Recommended IDE Setup
+## 构建
 
-- [VS Code](https://code.visualstudio.com/) + [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar)
+```bash
+npm install
+npm run build   # 含 vue-tsc 类型检查，产物在 dist/
+```
 
-## Type Support For `.vue` Imports in TS
+## 测试
 
-Since TypeScript cannot handle type information for `.vue` imports, they are shimmed to be a generic Vue component type
-by default. In most cases this is fine if you don't really care about component prop types outside of templates.
-However, if you wish to get actual prop types in `.vue` imports (for example to get props validation when using
-manual `h(...)` calls), you can enable Volar's Take Over mode by following these steps:
+测试是无运行器的独立脚本（`test-*.ts`，用 `tsx` 逐个执行）：
 
-1. Run `Extensions: Show Built-in Extensions` from VS Code's command palette, look
-   for `TypeScript and JavaScript Language Features`, then right click and select `Disable (Workspace)`. By default,
-   Take Over mode will enable itself if the default TypeScript extension is disabled.
-2. Reload the VS Code window by running `Developer: Reload Window` from the command palette.
+```bash
+npx tsx test-pipeline.ts
+```
 
-You can learn more about Take Over mode [here](https://github.com/johnsoncodehk/volar/discussions/471).
+共 12 个脚本，完整清单与期望输出见 [android/README.md](../../android/README.md) 的「验证」节。
+
+## 文档
+
+- 平台绑定契约（`@bridge` 导出、事件、编码语义等）：[android/README.md](../../android/README.md)
+- 应用级文档（Windows 版特性、构建与发布）：[根目录 README.md](../../README.md)

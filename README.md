@@ -52,6 +52,7 @@ WebView2 运行时 Windows 10/11 自带；缺失时安装版会自动补装。
 ## Android 版
 
 同一份 Vue 前端跑在原生 Kotlin + WebView 外壳里，渲染/编辑管线与 Windows 版一致。
+系统要求：**Android 7.0（API 24）及以上**。
 平台细节见 [android/README.md](android/README.md)。
 
 ### 安装
